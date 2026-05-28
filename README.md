@@ -160,6 +160,33 @@ DataStore recorded balance equals its actual on-chain SEP-41 balance.
 
 ---
 
+## Canonical Storage Model
+
+> **Resolves issue #2 — Decide the canonical storage model for requests and positions.**
+
+All transient request types (Deposits, Withdrawals, Orders) and long-lived Positions live in **handler-local persistent storage** within their respective contracts rather than in the shared global `data_store`.
+
+### Chosen Architecture: Local Persistent Storage
+
+```
+DepositHandler      ──► (Local persistent storage: DepositProps)
+WithdrawalHandler   ──► (Local persistent storage: WithdrawalProps)
+OrderHandler        ──► (Local persistent storage: OrderProps & PositionProps)
+```
+
+- **Deposits**: Persisted locally in `deposit_handler` using `LocalKey::Deposit(nonce)`.
+- **Withdrawals**: Persisted locally in `withdrawal_handler` using `LocalKey::Withdrawal(nonce)`.
+- **Orders**: Persisted locally in `order_handler` using `OrderStorageKey::Order(nonce)`.
+- **Positions**: Persisted locally in `order_handler` using `PositionStorageKey::Position(key)`.
+
+### Rationale
+
+1. **Storage Rent (TTL) Isolation**: Soroban requires rent (TTL) for persistent storage. Distributing user-specific transient requests (deposits, withdrawals, orders) and positions to their local handler contracts isolates their TTL management. This prevents the shared `data_store` from becoming an eviction risk or billing bottleneck.
+2. **Access Control & Encapsulation**: Storing positions and orders within `order_handler` ensures that only authorized logic in `order_handler` (e.g. `create_order`, `execute_order`) can mutate position state. If stored in a shared `data_store`, any contract with write access to the `data_store` could corrupt position records.
+3. **CPU Instruction / Serialization Savings**: Centralized databases like `data_store` store values in generic key-value maps. Cross-contract struct serialization/deserialization into `data_store` introduces significant CPU instruction overhead. Storing structs locally allows direct, type-safe serialization within the contract's namespace.
+
+---
+
 ## Multi-hop Swap Semantics
 
 > **Resolves issue #57 — Audit multi-hop swap token movement semantics.**
@@ -953,6 +980,34 @@ make upgrade-all NETWORK=testnet SOURCE=deployer
 ```
 
 `market_token` is listed in `IMMUTABLE_CONTRACTS` in `mx/upgrade.mk` and is skipped by `make upgrade-all`.
+
+---
+
+## Contract Responsibility Matrix
+
+> **Resolves issue #4 — Create a contract responsibility matrix.**
+
+This matrix maps every contract under `contracts/*` to its state ownership, initialization parameters, access controls, collaboration graph, events, and upgrade characteristics.
+
+| Contract | State Keys Owned | Init Arguments | Access Control / Roles Checked | Collaborating Contracts | Emitted Events | Upgrade Policy |
+|---|---|---|---|---|---|---|
+| `role_store` | `Admin`, `Initialized`, `(account, role) -> bool` | `admin: Address` | `Admin` auth for modification. | None | `RoleGranted`, `RoleRevoked` | ✅ Upgradeable (Admin) |
+| `data_store` | `Admin`, `RoleStore`, arbitrary KV pairs | `admin: Address`, `role_store: Address` | `CONTROLLER` role for state mutation. | `role_store` | None | ✅ Upgradeable (Admin) |
+| `oracle` | `Admin`, `RoleStore`, `DataStore`, `Passphrase`, temporary prices | `admin`, `role_store`, `data_store`, `passphrase: Bytes` | `price_keeper` / `order_keeper` role to set prices. | `role_store`, `data_store` | `prices_set` | ✅ Upgradeable (Admin) |
+| `market_factory` | `Admin`, `RoleStore`, `DataStore`, `MarketTokenWasmHash` | `admin`, `role_store`, `data_store` | `MARKET_KEEPER` role to create markets. | Deploys `market_token`; writes to `data_store`. | `wasm_set`, `mkt_new` | ✅ Upgradeable (Admin) |
+| `market_token` | Token balances, allowances, metadata | `admin`, `role_store`, `decimal`, `name`, `symbol` | `CONTROLLER` role to mint/burn. | `role_store` | SEP-41 Transfer, Approval, Mint, Burn | ❌ Immutable |
+| `deposit_vault` | `RoleStore`, `TokenBalance(Address)` | `admin`, `role_store` | `CONTROLLER` role for `transfer_out`. | SEP-41 tokens, `role_store` | None | ❌ Immutable |
+| `withdrawal_vault` | `RoleStore`, `TokenBalance(Address)` | `admin`, `role_store` | `CONTROLLER` role for `transfer_out`. | `market_token`, `role_store` | None | ❌ Immutable |
+| `order_vault` | `RoleStore`, `TokenBalance(Address)` | `admin`, `role_store` | `CONTROLLER` role for `transfer_out`. | SEP-41 tokens, `role_store` | None | ❌ Immutable |
+| `deposit_handler` | `Admin`, `RoleStore`, `DataStore`, `Oracle`, `DepositVault`, `LocalKey::Deposit(nonce)` | `admin`, `role_store`, `data_store`, `oracle`, `deposit_vault` | `ORDER_KEEPER` role to execute/cancel. | `deposit_vault`, `market_token`, `data_store`, `oracle`, `role_store` | `dep_req`, `dep_exec`, `dep_fail` | ✅ Upgradeable (Admin) |
+| `withdrawal_handler` | `Admin`, `RoleStore`, `DataStore`, `Oracle`, `WithdrawalVault`, `LocalKey::Withdrawal(nonce)` | `admin`, `role_store`, `data_store`, `oracle`, `withdrawal_vault` | `ORDER_KEEPER` role to execute/cancel. | `withdrawal_vault`, `market_token`, `data_store`, `oracle`, `role_store` | `wd_req`, `wd_exec`, `wd_fail` | ✅ Upgradeable (Admin) |
+| `order_handler` | `Admin`, `RoleStore`, `DataStore`, `Oracle`, `OrderVault`, `OrderStorageKey::Order(nonce)`, `PositionStorageKey::Position(key)` | `admin`, `role_store`, `data_store`, `oracle`, `order_vault` | `ORDER_KEEPER` for orders. `LIQUIDATION_KEEPER`/`ADL_KEEPER`/`CONTROLLER` for positions. | `order_vault`, `data_store`, `oracle`, `role_store`, libs | `ord_req`, `ord_exec`, `ord_fail`, `pos_update` | ✅ Upgradeable (Admin) |
+| `liquidation_handler` | `Admin`, `RoleStore`, `DataStore`, `Oracle`, `OrderHandler` | `admin`, `role_store`, `data_store`, `oracle`, `order_handler` | `LIQUIDATION_KEEPER` role to liquidate. | `order_handler`, `data_store`, `oracle`, `role_store` | `liq_req` | ✅ Upgradeable (Admin) |
+| `adl_handler` | `Admin`, `RoleStore`, `DataStore`, `Oracle`, `OrderHandler` | `admin`, `role_store`, `data_store`, `oracle`, `order_handler` | `ADL_KEEPER` role to execute ADL. | `order_handler`, `data_store`, `oracle`, `role_store` | `adl_req` | ✅ Upgradeable (Admin) |
+| `fee_handler` | `Admin`, `RoleStore`, `DataStore` | `admin`, `role_store`, `data_store` | `FEE_KEEPER` role to claim fees. | `data_store`, `role_store`, SEP-41 tokens | `fees_claimed` | ✅ Upgradeable (Admin) |
+| `referral_storage` | `Admin`, `ReferralKey::CodeOwner`, `ReferralKey::TraderCode`, `ReferralKey::ReferrerTier`, `ReferralKey::TierConfig` | `admin: Address` | `Admin` auth for configuring tiers. | None | `CodeRegistered`, `TraderCodeSet` | ✅ Upgradeable (Admin) |
+| `reader` | None (Stateless) | None | None (Public view-only) | `data_store`, `oracle` | None | ✅ Upgradeable (Admin) |
+| `exchange_router` | `Admin`, `RoleStore`, `DataStore`, `DepositHandler`, `WithdrawalHandler`, `OrderHandler` | `admin`, `role_store`, `data_store`, `deposit_handler`, `withdrawal_handler`, `order_handler` | None (Public user entry point) | `deposit_handler`, `withdrawal_handler`, `order_handler`, SEP-41 tokens | None | ✅ Upgradeable (Admin) |
 
 ---
 
