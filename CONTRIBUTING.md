@@ -55,3 +55,12 @@ Test token setup writes:
 
 Use `make addresses NETWORK=<network>` to inspect the active deployment before
 running any upgrade.
+
+## Architectural Guidelines
+
+### Local Storage Policy
+When implementing or modifying handlers (e.g. deposit, withdrawal, order, liquidation, or ADL logic), follow the **local persistent storage model** (Issue #2). Transient request states and position records must be stored in the contract's own persistent storage using unique enum keys, rather than in the shared global `data_store`. This maintains Soroban rent (TTL) isolation, enforces strict access boundaries, and optimizes CPU instruction consumption.
+
+### Contract Responsibility Matrix
+Before introducing new contract types or modifying existing ones, consult the **Contract Responsibility Matrix** in [README.md](README.md#contract-responsibility-matrix) (Issue #4). Ensure all new code complies with the specified storage access rules, caller roles, and upgrade capabilities.
+
