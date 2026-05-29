@@ -43,7 +43,7 @@ Reader         ──► stateless views over DataStore (no writes)
 |---|---|
 | `data_store` | Universal typed key-value store. All protocol state lives here. |
 | `role_store` | Role-based access control — CONTROLLER, MARKET_KEEPER, ORDER_KEEPER, etc. |
-| `oracle` | Keeper-fed price store. Prices expire per ledger. Ed25519-verified. |
+| `oracle` | Keeper-fed price store. Prices expire per ledger. Ed25519-verified. (Mainnet uses cryptographically signed prices only; test-only paths are excluded from production builds.) |
 | `market_token` | SEP-41 LP token deployed per market by `market_factory`. |
 | `market_factory` | Deterministically deploys `market_token` instances and registers markets. |
 | `deposit_vault` | Holds long/short tokens between deposit creation and keeper execution. |

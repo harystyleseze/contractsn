@@ -667,6 +667,14 @@ pub fn max_pnl_factor_for_withdrawals_key(env: &Env) -> BytesN<32> {
     sha256(env, &b)
 }
 
+// ─── Pause keys ──────────────────────────────────────────────────────────────
+
+pub fn global_pause_key(env: &Env) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "GLOBAL_PAUSE");
+    sha256(env, &b)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
