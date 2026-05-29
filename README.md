@@ -603,6 +603,79 @@ echo $EXCHANGE_ROUTER
 
 ---
 
+## Testnet Market Bootstrap
+
+After the protocol contracts are deployed, you need to create a market, grant keeper roles, set config parameters, and seed initial liquidity before the protocol is usable. `scripts/bootstrap.sh` automates all of these steps.
+
+### Quick start (end-to-end fresh testnet deployment)
+
+```bash
+# 1. Generate and fund keys
+stellar keys generate --global alice  --network testnet
+stellar keys generate --global keeper --network testnet
+stellar keys fund alice  --network testnet
+stellar keys fund keeper --network testnet
+
+# 2. Create and fund test tokens (TWBTC = long, TUSDC = short)
+make market-tokens NETWORK=testnet SOURCE=alice LONG_CODE=TWBTC SHORT_CODE=TUSDC
+
+# 3. Deploy all protocol contracts
+make deploy-all NETWORK=testnet SOURCE=alice
+
+# 4. Bootstrap: grant roles, create market, set config keys
+make bootstrap NETWORK=testnet SOURCE=alice KEEPER=keeper LONG_CODE=TWBTC SHORT_CODE=TUSDC
+
+# 5. Submit initial oracle prices
+bash scripts/submit_prices.sh testnet keeper
+
+# 6. Seed the market with initial liquidity
+#    (see output of make bootstrap for the exact deposit_handler invocation)
+```
+
+### Bootstrap targets
+
+| Target | Description |
+|---|---|
+| `make market-tokens` | Create and fund both TWBTC and TUSDC test tokens |
+| `make bootstrap` | Full post-deploy bootstrap (roles + market + config + seed instructions) |
+| `make market-init` | Market creation and config only (skip role grants and seed) |
+| `make seed-liquidity` | Print instructions for seeding the pool with initial liquidity |
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `KEEPER` | `$(SOURCE)` | Stellar key name for the keeper account |
+| `LONG_CODE` | `TWBTC` | Ticker of the long token |
+| `SHORT_CODE` | `TUSDC` | Ticker of the short token |
+| `SEED_LONG` | `10000000` | Long token amount for initial liquidity seed |
+| `SEED_SHORT` | `10000000` | Short token amount for initial liquidity seed |
+| `SKIP_ROLES` | `0` | Set to `1` to skip role grants (idempotent re-run) |
+| `SKIP_MARKET` | `0` | Set to `1` to skip market creation (already created) |
+| `SKIP_CONFIG` | `0` | Set to `1` to skip config key writes |
+| `SKIP_SEED` | `0` | Set to `1` to skip liquidity seed instructions |
+
+### What the bootstrap script does
+
+1. **Grant keeper roles** — grants `MARKET_KEEPER`, `ORDER_KEEPER`, `LIQUIDATION_KEEPER`, `ADL_KEEPER`, and `FEE_KEEPER` roles to the keeper account in `role_store`.
+2. **Create market** — calls `market_factory.create_market(index_token, long_token, short_token)` and saves the new `MARKET_TOKEN` address to `.deployed/<NETWORK>.env`.
+3. **Set config keys** — writes per-market config parameters (`max_pool_amount`, `min_collateral_factor`, `max_leverage`, fee factors, borrowing factors, funding factors) to `data_store`.
+4. **Seed instructions** — prints the manual steps for seeding initial liquidity, since the oracle must be running first.
+
+### Repeatable and idempotent
+
+The bootstrap can be re-run safely with `SKIP_*` flags for the steps already completed:
+
+```bash
+# Re-run only config key updates for an existing market
+make market-init NETWORK=testnet SOURCE=alice SKIP_ROLES=1 SKIP_SEED=1
+
+# Re-run only role grants
+make bootstrap NETWORK=testnet SOURCE=alice SKIP_MARKET=1 SKIP_CONFIG=1 SKIP_SEED=1
+```
+
+---
+
 ## Deploy to Testnet (manual)
 
 The steps below are the manual equivalent of `make deploy`, useful for debugging individual steps or partial re-deploys.
