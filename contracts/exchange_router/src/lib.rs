@@ -20,6 +20,7 @@ use soroban_sdk::{
 use gmx_types::{
     CreateDepositParams, CreateWithdrawalParams, CreateOrderParams,
 };
+use gmx_keys::global_pause_key;
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
@@ -85,9 +86,17 @@ pub enum Error {
     AlreadyInitialized = 1,
     NotInitialized     = 2,
     Unauthorized       = 3,
+    Paused             = 4,
 }
 
 // ─── External handler clients ─────────────────────────────────────────────────
+
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "DataStoreClient")]
+trait IDataStore {
+    fn get_bool(env: Env, key: BytesN<32>) -> bool;
+    fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
+}
 // Signatures must match the handler contract's public functions exactly.
 
 #[allow(dead_code)]
@@ -167,6 +176,23 @@ impl ExchangeRouter {
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
+    pub fn set_paused(env: Env, paused: bool) {
+        let admin: Address = env.storage().instance().get(&InstanceKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        admin.require_auth();
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        DataStoreClient::new(&env, &data_store).set_bool(&env.current_contract_address(), &global_pause_key(&env), &paused);
+    }
+
+    fn require_not_paused(env: &Env) {
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(env, Error::NotInitialized));
+        let ds = DataStoreClient::new(env, &data_store);
+        if ds.get_bool(&global_pause_key(env)) {
+            panic_with_error!(env, Error::Paused);
+        }
+    }
+
     // ── Multicall ─────────────────────────────────────────────────────────────
 
     /// Execute a batch of actions atomically.
@@ -176,6 +202,7 @@ impl ExchangeRouter {
     /// If any action panics, the entire transaction reverts (Soroban atomicity).
     pub fn multicall(env: Env, caller: Address, actions: Vec<RouterAction>) -> Vec<BytesN<32>> {
         caller.require_auth();
+        Self::require_not_paused(&env);
 
         let mut results: Vec<BytesN<32>> = Vec::new(&env);
         let zero_key = BytesN::from_array(&env, &[0u8; 32]);

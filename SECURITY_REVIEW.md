@@ -138,3 +138,22 @@ An on-chain timelock requires a delayed execution queue where administrative pro
 2. **CPU & Memory Limitations:** Soroban transactions are constrained by strict CPU instruction and memory limits. Passing every administrative write through an intermediary timelock contract significantly increases transaction complexity and gas costs.
 3. **Contract Size Limit:** Implementing a complete proposal, voting, queuing, and execution governance system in Rust easily exceeds the 64KB Wasm contract size limit without major structural partitioning.
 4. **Development Deferral:** Operational timelocks (such as off-chain multi-sig signing policies that require a 48-hour review period before signing) can be enforced legally and operationally at launch, deferring the development of complex on-chain timelock wrappers to a future governance phase.
+
+---
+
+## 7. LP Mint/Burn and Pool Value Arithmetic (Issue #148)
+
+A security review of the LP pricing, pool value, and redemption math in `libs/market_utils`, `deposit_handler`, and `withdrawal_handler` was conducted to identify manipulation vectors.
+
+### 7.1 First-Deposit LP Pricing
+* **Observation:** In `get_market_token_price`, if `total_supply <= 0`, the price defaults to `FLOAT_PRECISION` ($1 per LP token).
+* **Security Posture:** Safe. Because pool reserves are tracked internally via `DataStore` (`pool_amount_key`) rather than by querying the raw `balance()` of the token contract, an attacker **cannot** execute the classic Uniswap V2 "first depositor" attack (where a user deposits 1 wei, donates 1,000,000 tokens to the contract, and heavily inflates the LP share price). Direct token donations to the vault do not inflate `pool_value`.
+
+### 7.2 Pool Value Calculation and PnL Cap
+* **Observation:** `get_pool_value` calculates `pool_value = long_usd + short_usd + impact_pool_usd - net_pnl`. There is currently no explicit fraction cap on `net_pnl`.
+* **Edge Case / Nonstandard Behavior:** If aggregate trader PnL is overwhelmingly positive and exceeds total pool assets, `pool_value` becomes `<= 0`. `get_market_token_price` handles this by resetting the LP price to `FLOAT_PRECISION` ($1). 
+* **Assumption Documented:** If a market is completely bankrupted by winning traders, the LP token price resets to $1 rather than converging to zero. Subsequent deposits into the bankrupted pool will mint LP tokens at the fresh $1 rate. While this prevents divide-by-zero panics, market creators should be aware that a bankrupt pool effectively "reboots" its LP pricing.
+
+### 7.3 LP Redemption Math
+* **Observation:** In `execute_withdrawal`, the payout is calculated pro-rata: `long_out = pool_amount * lp_amount / total_supply`.
+* **Security Posture:** Safe. The withdrawal math relies strictly on the internal `pool_amount` ledger rather than the actual vault balance. This ensures that LPs can only withdraw their fair share of the actively tracked pool reserves, ignoring any externally airdropped tokens that might sit in the vault. Furthermore, the `min_long_token_amount` and `min_short_token_amount` slippage parameters rigorously enforce user-defined minimums, preventing keeper front-running during withdrawals.

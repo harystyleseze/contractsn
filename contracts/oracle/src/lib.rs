@@ -166,6 +166,7 @@ impl Oracle {
     ///
     /// Simpler path: caller must have ORDER_KEEPER role, no ed25519 required.
     /// Suitable for local/test environments where keepers are fully trusted.
+    #[cfg(any(test, feature = "testutils"))]
     pub fn set_prices_simple(env: Env, caller: Address, prices: Vec<TokenPrice>) {
         caller.require_auth();
         require_order_keeper(&env, &caller);

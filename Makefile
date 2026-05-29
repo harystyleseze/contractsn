@@ -22,6 +22,7 @@ help:
 	@printf '%s\n' '  make lint'
 	@printf '%s\n' '  make test'
 	@printf '%s\n' '  make build'
+	@printf '%s\n' '  make smoke-prices'
 	@printf '%s\n' ''
 	@printf '%s\n' 'Deploy and upgrade:'
 	@printf '%s\n' '  make deploy-all NETWORK=testnet SOURCE=alice'

@@ -65,6 +65,7 @@ Below is the responsibility mapping of every contract under `contracts/*` within
 - **State Owned**: `InstanceKey::Admin`, `InstanceKey::RoleStore`, `InstanceKey::DataStore`, and temporary price records.
 - **Initialization Args**: `admin: Address, role_store: Address, data_store: Address, passphrase: Bytes`
 - **Roles Checked**: `price_keeper` / `order_keeper` role required to set prices.
+- **Trust Model (Issue #146)**: Mainnet uses custom keeper signatures (ed25519 verified). No test-only price path (`set_prices_simple`) is reachable in the production oracle contract, as it is strictly gated behind the `testutils` feature.
 - **Callers**: Handlers and readers.
 - **Callees**: `role_store`, `data_store`.
 - **Emitted Events**: `prices_set` (implied).
