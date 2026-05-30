@@ -310,6 +310,22 @@ pub fn claimable_fee_amount_key(env: &Env, market: &Address, token: &Address) ->
     sha256(env, &b)
 }
 
+/// sha256("CLAIMABLE_UI_FEE_AMOUNT" ‖ token ‖ ui_receiver)
+///
+/// Stores the UI fee accrued for a specific receiver + token pair.
+/// Added for issue #85 — UI fee claiming.
+pub fn claimable_ui_fee_amount_key(
+    env: &Env,
+    token: &Address,
+    ui_receiver: &Address,
+) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "CLAIMABLE_UI_FEE_AMOUNT");
+    push_addr(&mut b, env, token);
+    push_addr(&mut b, env, ui_receiver);
+    sha256(env, &b)
+}
+
 /// sha256("FUNDING_UPDATED_AT" ‖ market)
 pub fn funding_updated_at_key(env: &Env, market: &Address) -> BytesN<32> {
     let mut b = Bytes::new(env);

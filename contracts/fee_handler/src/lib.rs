@@ -10,6 +10,7 @@ use soroban_sdk::{
 use gmx_keys::{
     roles,
     claimable_fee_amount_key, claimable_funding_amount_key,
+    claimable_ui_fee_amount_key,
 };
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
@@ -32,6 +33,7 @@ pub enum Error {
     NotInitialized     = 2,
     Unauthorized       = 3,
     NothingToClaim     = 4,
+    InvalidAmount      = 5,
 }
 
 // ─── External clients ─────────────────────────────────────────────────────────
@@ -74,6 +76,22 @@ pub struct FundingFeeClaimed {
     pub market:  Address,
     pub token:   Address,
     pub amount:  u128,
+}
+
+#[contractevent(topics = ["ui_fee_acc"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiFeeAccrued {
+    pub ui_receiver: Address,
+    pub token:       Address,
+    pub amount:      u128,
+}
+
+#[contractevent(topics = ["ui_fee_clm"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiFeeClaimed {
+    pub ui_receiver: Address,
+    pub token:       Address,
+    pub amount:      u128,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -142,6 +160,77 @@ impl FeeHandler {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    // ── UI fee API (issue #85) ────────────────────────────────────────────────
+
+    /// Return the accumulated UI fee for a (token, ui_receiver) pair.
+    pub fn claimable_ui_fees(env: Env, token: Address, ui_receiver: Address) -> u128 {
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let key = claimable_ui_fee_amount_key(&env, &token, &ui_receiver);
+        DataStoreClient::new(&env, &data_store).get_u128(&key)
+    }
+
+    /// Accrue a UI fee on behalf of a receiver (called by the exchange_router on every swap/trade).
+    ///
+    /// Only a caller that holds the CONTROLLER role may accrue fees; this prevents
+    /// arbitrary inflation of a receiver's balance.
+    pub fn accrue_ui_fee(
+        env: Env,
+        controller: Address,
+        token: Address,
+        ui_receiver: Address,
+        amount: u128,
+    ) {
+        controller.require_auth();
+
+        let role_store: Address = env.storage().instance().get(&InstanceKey::RoleStore).unwrap();
+        if !RoleStoreClient::new(&env, &role_store).has_role(&controller, &roles::controller(&env)) {
+            panic_with_error!(&env, Error::Unauthorized);
+        }
+        if amount == 0 {
+            panic_with_error!(&env, Error::InvalidAmount);
+        }
+
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let handler = env.current_contract_address();
+        let key = claimable_ui_fee_amount_key(&env, &token, &ui_receiver);
+        DataStoreClient::new(&env, &data_store)
+            .apply_delta_to_u128(&handler, &key, &(amount as i128));
+
+        env.events().publish_event(&UiFeeAccrued { ui_receiver, token, amount });
+    }
+
+    /// Claim all accrued UI fees for the calling receiver.
+    ///
+    /// A receiver may only claim their own balance — passing a different address as
+    /// `ui_receiver` will fail the `require_auth()` check.
+    pub fn claim_ui_fees(
+        env: Env,
+        ui_receiver: Address,
+        market: Address,
+        token: Address,
+    ) -> u128 {
+        ui_receiver.require_auth();
+
+        let data_store: Address = env.storage().instance().get(&InstanceKey::DataStore).unwrap();
+        let ds = DataStoreClient::new(&env, &data_store);
+        let handler = env.current_contract_address();
+
+        let key = claimable_ui_fee_amount_key(&env, &token, &ui_receiver);
+        let amount = ds.get_u128(&key);
+        if amount == 0 {
+            panic_with_error!(&env, Error::NothingToClaim);
+        }
+
+        ds.set_u128(&handler, &key, &0u128);
+
+        // Transfer from the market pool to the UI receiver.
+        MarketTokenClient::new(&env, &market)
+            .withdraw_from_pool(&handler, &token, &ui_receiver, &(amount as i128));
+
+        env.events().publish_event(&UiFeeClaimed { ui_receiver, token, amount });
+        amount
     }
 
     /// Claim funding fees earned by a position account. Anyone can call for their own account.
@@ -381,6 +470,138 @@ mod tests {
         // No auth context — must panic at admin.require_auth().
         FeeHandlerClient::new(&env, &handler)
             .upgrade(&BytesN::from_array(&env, &[0u8; 32]));
+    }
+
+    // ── Issue #85: UI fee accrual + claiming ──────────────────────────────────
+
+    /// claimable_ui_fees returns 0 before any accrual.
+    #[test]
+    fn claimable_ui_fees_zero_initially() {
+        let w = setup();
+        let ui_recv = Address::generate(&w.env);
+        let amount = FeeHandlerClient::new(&w.env, &w.handler)
+            .claimable_ui_fees(&w.long_tk, &ui_recv);
+        assert_eq!(amount, 0, "UI fee balance must be zero before any accrual");
+    }
+
+    /// accrue_ui_fee accumulates the amount; claimable_ui_fees reflects it.
+    #[test]
+    fn accrue_ui_fee_accumulates_correctly() {
+        let w = setup();
+        let ui_recv = Address::generate(&w.env);
+        let fh = FeeHandlerClient::new(&w.env, &w.handler);
+
+        // Grant handler the CONTROLLER role so it can accrue (already done in setup via handler)
+        // Use admin as controller (it holds CONTROLLER from setup).
+        fh.accrue_ui_fee(&w.admin, &w.long_tk, &ui_recv, &500u128);
+        assert_eq!(fh.claimable_ui_fees(&w.long_tk, &ui_recv), 500);
+
+        // Second accrual stacks.
+        fh.accrue_ui_fee(&w.admin, &w.long_tk, &ui_recv, &300u128);
+        assert_eq!(fh.claimable_ui_fees(&w.long_tk, &ui_recv), 800);
+    }
+
+    /// claim_ui_fees transfers the full accrued amount to the receiver and zeroes balance.
+    #[test]
+    fn claim_ui_fees_transfers_and_zeroes_balance() {
+        let w = setup();
+        let ui_recv = Address::generate(&w.env);
+        let fee_amount: u128 = ONE_TOKEN as u128 * 2;
+        let fh = FeeHandlerClient::new(&w.env, &w.handler);
+
+        // Accrue fees.
+        fh.accrue_ui_fee(&w.admin, &w.long_tk, &ui_recv, &fee_amount);
+
+        // Mint tokens into market pool so withdraw_from_pool can pay out.
+        StellarAssetClient::new(&w.env, &w.long_tk)
+            .mint(&w.market_tk, &(fee_amount as i128));
+
+        let bal_before = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&ui_recv);
+        let claimed = fh.claim_ui_fees(&ui_recv, &w.market_tk, &w.long_tk);
+
+        let bal_after = soroban_sdk::token::Client::new(&w.env, &w.long_tk).balance(&ui_recv);
+        assert_eq!(claimed, fee_amount, "claim_ui_fees must return the accrued amount");
+        assert_eq!((bal_after - bal_before) as u128, fee_amount,
+            "receiver must get the full accrued UI fee amount");
+        assert_eq!(fh.claimable_ui_fees(&w.long_tk, &ui_recv), 0,
+            "balance must be zero after claim");
+    }
+
+    /// claim_ui_fees reverts with NothingToClaim when the balance is zero.
+    #[test]
+    #[should_panic]
+    fn claim_ui_fees_nothing_to_claim_reverts() {
+        let w = setup();
+        let ui_recv = Address::generate(&w.env);
+        FeeHandlerClient::new(&w.env, &w.handler)
+            .claim_ui_fees(&ui_recv, &w.market_tk, &w.long_tk);
+    }
+
+    /// A receiver cannot claim another receiver's fees — auth must gate the call.
+    #[test]
+    #[should_panic]
+    fn claim_ui_fees_wrong_receiver_reverts() {
+        let env = Env::default();
+        // Do NOT mock_all_auths so require_auth() actually enforces identity.
+        let admin  = Address::generate(&env);
+        let keeper = Address::generate(&env);
+
+        let rs = env.register(RoleStore, ());
+        let rs_c = RsClient::new(&env, &rs);
+        env.mock_all_auths_allowing_non_root_auth();
+        rs_c.initialize(&admin);
+        rs_c.grant_role(&admin, &admin,  &roles::controller(&env));
+        rs_c.grant_role(&admin, &keeper, &roles::fee_keeper(&env));
+
+        let ds = env.register(DataStore, ());
+        DsClient::new(&env, &ds).initialize(&admin, &rs);
+
+        let market_tk = env.register(MarketToken, ());
+        MtClient::new(&env, &market_tk).initialize(
+            &admin, &rs, &7u32,
+            &soroban_sdk::String::from_str(&env, "UI Test Market"),
+            &soroban_sdk::String::from_str(&env, "UM"),
+        );
+        rs_c.grant_role(&admin, &market_tk, &roles::controller(&env));
+
+        let long_tk = env.register_stellar_asset_contract_v2(admin.clone()).address();
+
+        let handler = env.register(FeeHandler, ());
+        let fh = FeeHandlerClient::new(&env, &handler);
+        fh.initialize(&admin, &rs, &ds);
+        rs_c.grant_role(&admin, &handler, &roles::controller(&env));
+
+        let real_recv  = Address::generate(&env);
+        let other_recv = Address::generate(&env);
+        let fee_amount: u128 = ONE_TOKEN as u128;
+
+        // Accrue for real_recv.
+        fh.accrue_ui_fee(&admin, &long_tk, &real_recv, &fee_amount);
+        StellarAssetClient::new(&env, &long_tk).mint(&market_tk, &(fee_amount as i128));
+
+        // other_recv attempts to claim real_recv's fees — must panic.
+        fh.claim_ui_fees(&other_recv, &market_tk, &long_tk);
+    }
+
+    /// accrue_ui_fee with amount == 0 must revert with InvalidAmount.
+    #[test]
+    #[should_panic]
+    fn accrue_ui_fee_zero_amount_reverts() {
+        let w = setup();
+        let ui_recv = Address::generate(&w.env);
+        FeeHandlerClient::new(&w.env, &w.handler)
+            .accrue_ui_fee(&w.admin, &w.long_tk, &ui_recv, &0u128);
+    }
+
+    /// Non-controller cannot accrue UI fees — Unauthorized expected.
+    #[test]
+    #[should_panic]
+    fn accrue_ui_fee_non_controller_reverts() {
+        let w = setup();
+        let impostor = Address::generate(&w.env);
+        let ui_recv  = Address::generate(&w.env);
+        FeeHandlerClient::new(&w.env, &w.handler)
+            .accrue_ui_fee(&impostor, &w.long_tk, &ui_recv, &100u128);
     }
 
     /// DataStore fee entries written before upgrade remain claimable after.
