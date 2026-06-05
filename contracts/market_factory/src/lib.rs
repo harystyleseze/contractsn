@@ -32,6 +32,7 @@ pub enum Error {
     Unauthorized = 3,
     MarketAlreadyExists = 4,
     WasmHashNotSet = 5,
+    SingleTokenPoolNotSupported = 6,
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -145,6 +146,12 @@ impl MarketFactory {
         caller.require_auth();
         require_market_keeper(&env, &caller);
 
+        // Single-token pools (long == short) require dedicated swap/impact logic
+        // that is not yet implemented. Reject until that work is complete.
+        if long_token == short_token {
+            panic_with_error!(&env, Error::SingleTokenPoolNotSupported);
+        }
+
         let wasm_hash: BytesN<32> = env
             .storage()
             .instance()
@@ -180,21 +187,24 @@ impl MarketFactory {
             panic_with_error!(&env, Error::MarketAlreadyExists);
         }
 
-        // Build LP token name/symbol
-        let name = String::from_str(&env, "GMX Market Token");
+        // Build LP token name/symbol.
+        // Display labels (e.g. "TWBTC/TUSDC") are derived at query time from
+        // the index/long/short addresses stored in data_store, not from this metadata.
+        let name = String::from_str(&env, "SO4 Market Token");
         let symbol = String::from_str(&env, "GM");
 
-        // Deploy market_token contract deterministically
+        // Deploy market_token contract deterministically, then initialize it.
+        // market_token uses the initialize() pattern, not __constructor, so we
+        // use deploy() (no constructor call) followed by an explicit initialize.
         let deployer = env.deployer().with_address(factory, salt);
-        let market_token_address = deployer.deploy_v2(
-            wasm_hash,
-            (
-                env.current_contract_address(), // admin = factory
-                role_store.clone(),
-                7u32, // Stellar 7-decimal precision
-                name,
-                symbol,
-            ),
+        let market_token_address = deployer.deploy(wasm_hash);
+
+        MarketTokenClient::new(&env, &market_token_address).initialize(
+            &env.current_contract_address(),
+            &role_store,
+            &7u32,
+            &name,
+            &symbol,
         );
 
         let market = MarketProps {
@@ -204,31 +214,35 @@ impl MarketFactory {
             short_token: short_token.clone(),
         };
 
-        // Register in data_store:
+        // Register in data_store using factory's own address as caller.
+        // The factory holds CONTROLLER role; passing the outer caller would
+        // require granting CONTROLLER to every MARKET_KEEPER, which is wrong.
+        let factory = env.current_contract_address();
+
         // 1. Store market existence flag
-        ds_client.set_bool(&caller, &market_key(&env, &market_token_address), &true);
+        ds_client.set_bool(&factory, &market_key(&env, &market_token_address), &true);
         // 2. Store constituent token addresses (so handlers can reconstruct MarketProps)
         ds_client.set_address(
-            &caller,
+            &factory,
             &market_index_token_key(&env, &market_token_address),
             &index_token,
         );
         ds_client.set_address(
-            &caller,
+            &factory,
             &market_long_token_key(&env, &market_token_address),
             &long_token,
         );
         ds_client.set_address(
-            &caller,
+            &factory,
             &market_short_token_key(&env, &market_token_address),
             &short_token,
         );
         // 3. Store token decimals (7 for Stellar standard)
-        ds_client.set_u128(&caller, &token_decimals_key(&env, &long_token), &7u128);
-        ds_client.set_u128(&caller, &token_decimals_key(&env, &short_token), &7u128);
-        ds_client.set_u128(&caller, &token_decimals_key(&env, &index_token), &7u128);
+        ds_client.set_u128(&factory, &token_decimals_key(&env, &long_token), &7u128);
+        ds_client.set_u128(&factory, &token_decimals_key(&env, &short_token), &7u128);
+        ds_client.set_u128(&factory, &token_decimals_key(&env, &index_token), &7u128);
         // 4. Add to market list
-        ds_client.add_address_to_set(&caller, &market_list_key(&env), &market_token_address);
+        ds_client.add_address_to_set(&factory, &market_list_key(&env), &market_token_address);
 
         env.events().publish(
             (symbol_short!("mkt_new"),),
@@ -241,6 +255,14 @@ impl MarketFactory {
         );
 
         market
+    }
+
+    // ── Upgrade ───────────────────────────────────────────────────────────────
+
+    pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) {
+        caller.require_auth();
+        require_admin(&env, &caller);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────
@@ -395,5 +417,16 @@ mod tests {
         let short_tk = Address::generate(&env);
         let mt = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
         client.create_market(&impostor, &index_tk, &long_tk, &short_tk, &mt);
+    }
+
+    #[test]
+    #[should_panic]
+    fn create_market_rejects_single_token_pool() {
+        let (env, admin, _rs, _ds, factory_id) = setup();
+        let client = MarketFactoryClient::new(&env, &factory_id);
+        let token = Address::generate(&env);
+        let mt = soroban_sdk::BytesN::from_array(&env, &[0u8; 32]);
+
+        client.create_market(&admin, &token, &token, &token, &mt);
     }
 }

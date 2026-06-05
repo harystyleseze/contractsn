@@ -319,6 +319,8 @@ sep
 echo -e "${BOLD}[8/8] Grant CONTROLLER role${NC}"
 
 for CONTRACT in \
+  "$ADMIN" \
+  "$MARKET_FACTORY" \
   "$DEPOSIT_HANDLER" \
   "$WITHDRAWAL_HANDLER" \
   "$ORDER_HANDLER" \

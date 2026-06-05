@@ -1,15 +1,32 @@
 # Test-token workflows.
 #
-# These targets create Stellar classic assets and deploy their Stellar Asset
-# Contracts (SACs). Use 7-decimal amounts for SO4.market math:
-#   1 TWBTC = 10000000
+# Two supported paths:
+#
+#   1. Native Soroban tokens (PRIMARY for testnet demos / faucet UX):
+#      Deploys contracts/test_token + contracts/test_faucet.
+#      Users claim tokens from the faucet; no trustlines required.
+#      Target: test-tokens-with-faucet  (and the four-token variant: test-tokens-all-with-faucet)
+#
+#   2. Stellar classic assets / SAC (for production-like collateral plumbing):
+#      Wraps a classic Stellar asset in a SAC via the stellar CLI.
+#      Requires trustlines and issuer keypairs.
+#      Targets: token-bootstrap, market-tokens
+#
+# Use 7-decimal amounts for SO4.market math:  1 TWBTC = 10000000
+#
+# IMPORTANT: test tokens must NEVER be deployed to mainnet. The guard-not-mainnet
+# target enforces this for all faucet/native-token deploy targets.
 
 CODE ?= TWBTC
 ISSUER ?= $(CODE)-issuer
 TO ?= $(SOURCE)
 AMOUNT ?= 1000000000
 
-.PHONY: token-issuer token-deploy token-id token-trust token-mint token-balance token-bootstrap tokens
+.PHONY: token-issuer token-deploy token-id token-trust token-mint token-balance token-bootstrap tokens guard-not-mainnet
+
+guard-not-mainnet:
+	@[ "$(NETWORK)" != "mainnet" ] || \
+	  { printf 'ERROR: test tokens must not be deployed to mainnet. Use real SAC IDs instead.\n' >&2; exit 1; }
 
 token-issuer: preflight
 	@if ! stellar keys address "$(ISSUER)" >/dev/null 2>&1; then \
@@ -93,9 +110,9 @@ CLAIM_AMOUNT ?= 1000000000
 FAUCET_COOLDOWN ?= 17280
 FAUCET ?=
 
-.PHONY: faucet-deploy test-token-deploy faucet-add-token faucet-claim faucet-claim-market test-tokens-with-faucet
+.PHONY: faucet-deploy test-token-deploy faucet-add-token faucet-claim faucet-claim-market test-tokens-with-faucet test-tokens-all-with-faucet
 
-faucet-deploy: preflight build
+faucet-deploy: preflight build guard-not-mainnet
 	@mkdir -p "$(DEPLOY_DIR)"
 	admin_addr="$$(stellar keys address "$(SOURCE)")"
 	wasm_hash="$$(stellar contract upload --wasm "$(WASM_DIR)/test_faucet.wasm" --source "$(SOURCE)" --network "$(NETWORK)")"
@@ -105,10 +122,12 @@ faucet-deploy: preflight build
 		--source "$(SOURCE)" \
 		--network "$(NETWORK)" \
 		-- initialize --admin "$$admin_addr" --cooldown_ledgers "$(FAUCET_COOLDOWN)" >/dev/null
-	printf 'FAUCET=%s\n' "$$faucet_id" >> "$(TOKEN_ENV)"
+	tmp="$$(mktemp)"
+	{ grep -v '^FAUCET=' "$(TOKEN_ENV)" 2>/dev/null || true; printf 'FAUCET=%s\n' "$$faucet_id"; } > "$$tmp"
+	mv "$$tmp" "$(TOKEN_ENV)"
 	printf '%s\n' "$$faucet_id"
 
-test-token-deploy: preflight build
+test-token-deploy: preflight build guard-not-mainnet
 	@test -n "$(FAUCET)" || { printf '%s\n' 'Usage: make test-token-deploy CODE=TWBTC FAUCET=C... NETWORK=testnet SOURCE=alice'; exit 1; }
 	@mkdir -p "$(DEPLOY_DIR)"
 	wasm_hash="$$(stellar contract upload --wasm "$(WASM_DIR)/test_token.wasm" --source "$(SOURCE)" --network "$(NETWORK)")"
@@ -118,8 +137,9 @@ test-token-deploy: preflight build
 		--source "$(SOURCE)" \
 		--network "$(NETWORK)" \
 		-- initialize --owner "$(FAUCET)" --decimal "$(TOKEN_DECIMALS)" --name "$(TOKEN_NAME)" --symbol "$(CODE)" >/dev/null
-	printf '%s=%s\n' "$(CODE)" "$$token_id" >> "$(TOKEN_ENV)"
-	printf '%s_NATIVE=%s\n' "$(CODE)" "$$token_id" >> "$(TOKEN_ENV)"
+	tmp="$$(mktemp)"
+	{ grep -v -e '^$(CODE)=' -e '^$(CODE)_NATIVE=' "$(TOKEN_ENV)" 2>/dev/null || true; printf '%s=%s\n' "$(CODE)" "$$token_id"; printf '%s_NATIVE=%s\n' "$(CODE)" "$$token_id"; } > "$$tmp"
+	mv "$$tmp" "$(TOKEN_ENV)"
 	printf '%s\n' "$$token_id"
 
 faucet-add-token: preflight
@@ -151,7 +171,7 @@ faucet-claim-market: preflight
 	$(MAKE) faucet-claim FAUCET="$$FAUCET" TOKEN="$$$(LONG_CODE)" TO="$(TO)" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)"; \
 	$(MAKE) faucet-claim FAUCET="$$FAUCET" TOKEN="$$$(SHORT_CODE)" TO="$(TO)" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)"
 
-test-tokens-with-faucet: preflight
+test-tokens-with-faucet: preflight guard-not-mainnet
 	@mkdir -p "$(DEPLOY_DIR)"
 	faucet_id="$$($(MAKE) --no-print-directory faucet-deploy NETWORK="$(NETWORK)" SOURCE="$(SOURCE)" FAUCET_COOLDOWN="$(FAUCET_COOLDOWN)" | tail -n 1)"
 	long_id="$$($(MAKE) --no-print-directory test-token-deploy CODE="$(LONG_CODE)" TOKEN_NAME="Test $(LONG_CODE)" TOKEN_DECIMALS="$(TOKEN_DECIMALS)" FAUCET="$$faucet_id" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)" | tail -n 1)"
@@ -162,3 +182,26 @@ test-tokens-with-faucet: preflight
 	@printf '  FAUCET=%s\n' "$$faucet_id"
 	@printf '  $(LONG_CODE)=%s\n' "$$long_id"
 	@printf '  $(SHORT_CODE)=%s\n' "$$short_id"
+
+# Deploy all four testnet tokens (TUSDC, TWBTC, TETH, TXLM) under a single faucet.
+# This is the standard full-testnet setup that backs all three GM markets.
+#
+# Usage:
+#   make test-tokens-all-with-faucet NETWORK=testnet SOURCE=alice
+test-tokens-all-with-faucet: preflight guard-not-mainnet
+	@mkdir -p "$(DEPLOY_DIR)"
+	faucet_id="$$($(MAKE) --no-print-directory faucet-deploy NETWORK="$(NETWORK)" SOURCE="$(SOURCE)" FAUCET_COOLDOWN="$(FAUCET_COOLDOWN)" | tail -n 1)"
+	tusdc_id="$$($(MAKE) --no-print-directory test-token-deploy CODE="TUSDC" TOKEN_NAME="Test USDC" TOKEN_DECIMALS="$(TOKEN_DECIMALS)" FAUCET="$$faucet_id" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)" | tail -n 1)"
+	twbtc_id="$$($(MAKE) --no-print-directory test-token-deploy CODE="TWBTC" TOKEN_NAME="Test Wrapped Bitcoin" TOKEN_DECIMALS="$(TOKEN_DECIMALS)" FAUCET="$$faucet_id" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)" | tail -n 1)"
+	teth_id="$$($(MAKE)  --no-print-directory test-token-deploy CODE="TETH"  TOKEN_NAME="Test Ether"           TOKEN_DECIMALS="$(TOKEN_DECIMALS)" FAUCET="$$faucet_id" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)" | tail -n 1)"
+	txlm_id="$$($(MAKE)  --no-print-directory test-token-deploy CODE="TXLM"  TOKEN_NAME="Test Stellar Lumen"  TOKEN_DECIMALS="$(TOKEN_DECIMALS)" FAUCET="$$faucet_id" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)" | tail -n 1)"
+	$(MAKE) --no-print-directory faucet-add-token FAUCET="$$faucet_id" TOKEN="$$tusdc_id" CLAIM_AMOUNT="$(CLAIM_AMOUNT)" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)"
+	$(MAKE) --no-print-directory faucet-add-token FAUCET="$$faucet_id" TOKEN="$$twbtc_id" CLAIM_AMOUNT="$(CLAIM_AMOUNT)" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)"
+	$(MAKE) --no-print-directory faucet-add-token FAUCET="$$faucet_id" TOKEN="$$teth_id"  CLAIM_AMOUNT="$(CLAIM_AMOUNT)" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)"
+	$(MAKE) --no-print-directory faucet-add-token FAUCET="$$faucet_id" TOKEN="$$txlm_id"  CLAIM_AMOUNT="$(CLAIM_AMOUNT)" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)"
+	@printf 'All four testnet tokens ready:\n'
+	@printf '  FAUCET=%s\n' "$$faucet_id"
+	@printf '  TUSDC=%s\n'  "$$tusdc_id"
+	@printf '  TWBTC=%s\n'  "$$twbtc_id"
+	@printf '  TETH=%s\n'   "$$teth_id"
+	@printf '  TXLM=%s\n'   "$$txlm_id"

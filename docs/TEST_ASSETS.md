@@ -4,50 +4,77 @@ This document describes the test assets used for testnet market initialization i
 
 ## Overview
 
-The protocol uses Stellar Asset Contracts (SACs) for test assets on testnet. These are wrapped versions of real assets that allow testing without using real value.
+The active testnet path uses **custom mintable Soroban tokens** (`contracts/test_token`) managed by a **faucet contract** (`contracts/test_faucet`). These are NOT Stellar classic assets or SACs — they are standalone Soroban contracts whose owner is set to the faucet, allowing users to self-claim tokens on testnet.
 
-### Standard Test Assets
+A Stellar classic asset / SAC path also exists (see § SAC Path) but is not the active testnet deployment.
 
-| Asset Code | Description | Decimals | Purpose |
-|------------|-------------|----------|---------|
-| **TWBTC** | Test Wrapped Bitcoin | 7 | Long token for markets |
-| **TUSDC** | Test USD Coin | 7 | Short token for markets |
+**Do not use either path for mainnet collateral.**
+
+### Standard Testnet Token Set
+
+All four tokens are deployed together under a single faucet:
+
+| Token Code | Description | Decimals | Role in markets |
+|------------|-------------|----------|-----------------|
+| **TUSDC** | Test USD Coin | 7 | Short token / collateral (all markets) |
+| **TWBTC** | Test Wrapped Bitcoin | 7 | Long + index token for TWBTC/TUSDC |
+| **TETH** | Test Ether | 7 | Long + index token for TETH/TUSDC |
+| **TXLM** | Test Stellar Lumen | 7 | Long + index token for TXLM/TUSDC |
 
 ## Asset Properties
 
 All test assets use Stellar's standard 7-decimal precision for consistency with the protocol's math:
 
-- 1 TWBTC = 10,000,000 base units (7 decimals)
-- 1 TUSDC = 10,000,000 base units (7 decimals)
+- 1 token = 10,000,000 base units (7 decimals)
+- `10000000` = 1 token
+- `1000000000` = 100 tokens
 
 ## Creating Test Assets
 
-You now have two supported test-asset paths:
+You have two supported test-asset paths:
 
-1. **SAC test assets** using Stellar classic assets. This is closest to
-   real-world collateral plumbing and remains the default market bootstrap path.
-2. **Native mintable test tokens** using this repo's `test_token` contract plus
-   `test_faucet`. This is best for demos, app testing, and user self-service
-   claims on testnet.
+1. **Native mintable test tokens** (ACTIVE testnet path) using `contracts/test_token` +
+   `contracts/test_faucet`. Users self-claim from the faucet; no trustlines required.
+2. **SAC test assets** using Stellar classic assets wrapped by SACs. Closest to
+   real-world collateral plumbing. See § SAC Path below.
 
 Do not use either path for mainnet collateral.
 
-## Native Faucet Tokens
+## Native Faucet Tokens (Active Testnet Path)
 
-Deploy a faucet plus TWBTC/TUSDC native test-token contracts:
+### Full four-token deploy (recommended)
+
+Deploy one faucet plus all four test tokens (TUSDC, TWBTC, TETH, TXLM):
 
 ```bash
-make test-tokens-with-faucet NETWORK=testnet SOURCE=alice LONG_CODE=TWBTC SHORT_CODE=TUSDC
+make test-tokens-all-with-faucet NETWORK=testnet SOURCE=alice
 ```
 
 This will:
 
 1. Deploy `test_faucet`
-2. Deploy one `test_token` instance per symbol
+2. Deploy four `test_token` instances (TUSDC, TWBTC, TETH, TXLM)
 3. Initialize each token with the faucet contract as owner
-4. Configure the faucet claim amount for both tokens
-5. Save `FAUCET`, `TWBTC`, `TUSDC`, and `*_NATIVE` IDs to
+4. Configure the faucet claim amount for each token
+5. Save `FAUCET`, `TUSDC`, `TWBTC`, `TETH`, `TXLM`, and `*_NATIVE` IDs to
    `.deployed/tokens-testnet.env`
+
+Then bootstrap all three markets:
+
+```bash
+make deploy-all NETWORK=testnet SOURCE=alice
+make bootstrap NETWORK=testnet SOURCE=alice LONG_CODE=TWBTC SHORT_CODE=TUSDC
+make bootstrap NETWORK=testnet SOURCE=alice LONG_CODE=TETH  SHORT_CODE=TUSDC SKIP_ROLES=1
+make bootstrap NETWORK=testnet SOURCE=alice LONG_CODE=TXLM  SHORT_CODE=TUSDC SKIP_ROLES=1
+```
+
+### Two-token deploy (single market)
+
+Deploy a faucet for one long/short token pair only:
+
+```bash
+make test-tokens-with-faucet NETWORK=testnet SOURCE=alice LONG_CODE=TWBTC SHORT_CODE=TUSDC
+```
 
 Useful overrides:
 
@@ -76,17 +103,7 @@ Or claim one token directly:
 make faucet-claim FAUCET=C... TOKEN=C... TO=bob NETWORK=testnet SOURCE=alice
 ```
 
-To use native faucet tokens for market bootstrap, run the native token setup
-first, then use the normal protocol deployment/bootstrap commands. The bootstrap
-script reads the same `.deployed/tokens-testnet.env` file.
-
-```bash
-make test-tokens-with-faucet NETWORK=testnet SOURCE=alice LONG_CODE=TWBTC SHORT_CODE=TUSDC
-make deploy-force NETWORK=testnet SOURCE=alice
-make bootstrap NETWORK=testnet SOURCE=alice LONG_CODE=TWBTC SHORT_CODE=TUSDC
-```
-
-## SAC Test Assets
+## SAC Path (Alternative — not active testnet deployment)
 
 ### Quick Start (Both Tokens)
 

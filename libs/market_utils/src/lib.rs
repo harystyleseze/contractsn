@@ -407,6 +407,15 @@ fn compute_next_funding_factor(
 // ─── Pool value ───────────────────────────────────────────────────────────────
 
 /// Full pool value breakdown (mirrors GMX's getPoolValue).
+///
+/// SIMPLIFIED vs GMX:
+///   - `total_borrowing_fees` is always 0. Full borrowing fee accrual requires
+///     tracking a per-side `cumulative_borrowing_factor` updated on every position
+///     event and is not yet implemented.
+///   - No `max_pnl_factor` cap is applied. GMX applies different PnL cap factors
+///     for deposit, withdrawal, and trader operations; this function returns the
+///     raw net PnL without capping. Pool token prices may diverge from GMX under
+///     large open interest. See docs/POOLS_REVIEW_IMPLEMENTATION_PLAN.md §Issue 7.
 pub fn get_pool_value(
     env: &Env,
     ds: &Address,
@@ -446,7 +455,7 @@ pub fn get_pool_value(
         short_token_usd: short_usd,
         long_token_amount: long_pool,
         short_token_amount: short_pool,
-        total_borrowing_fees: 0, // simplified: computed separately when needed
+        total_borrowing_fees: 0, // SIMPLIFIED: borrowing fee accrual not yet implemented
         impact_pool_amount: impact_pool_tokens,
     }
 }

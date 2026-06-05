@@ -20,6 +20,37 @@ Derived from `docs/POOLS_REVIEEW.md`. Addresses all 9 inconsistencies against GM
 
 ---
 
+## Current Progress
+
+As of June 5, 2026, the testnet bootstrap blockers are resolved for the active custom-token path.
+
+- `bootstrap.sh` now passes `market_type = sha256("DEFAULT")` to `market_factory.create_market`.
+- `configure_market.sh` writes the implemented GMX-style config keys that exist in `libs/keys`.
+- `market_factory` registers markets through the factory address so `MARKET_KEEPER` does not also need `CONTROLLER`.
+- `deploy.sh` grants `CONTROLLER` to the admin and market factory for testnet/operator configuration.
+- Single-token pools are explicitly rejected until the single-token execution paths are audited.
+- Active testnet tokens are custom Soroban faucet tokens: `TUSDC`, `TWBTC`, `TETH`, and `TXLM`.
+- Frontend config export now emits real Soroban contract addresses for all bootstrapped markets.
+
+Bootstrapped testnet markets:
+
+```text
+TWBTC/TUSDC  market_token = CDDVSLBGGDV2UOFN5W72R4LW7ABYL7H7ZWVSFHGMXXB3D52ZYANC5G3L
+TETH/TUSDC   market_token = CCBUUSYZJTGVA6PYUNQDFPZFHTBZ2QSHOUO7YAGRQVA46T3ZLSIYULS4
+TXLM/TUSDC   market_token = CDIBR7BDCDWGAG3CC6PBKRSLMISPYKNDGE57DCZO5TMTLZK34TMGKFQQ
+```
+
+Generated frontend files:
+
+```text
+.deployed/frontend-testnet.env
+.deployed/frontend-testnet.ts
+```
+
+Remaining MVP work after this pass: submit/verify oracle prices, seed initial liquidity, and run an end-to-end deposit/withdraw/order smoke test against these real market token IDs.
+
+---
+
 ## Workstream 1 — Scripts & Bootstrap Fixes
 
 ### Issue 1: `bootstrap.sh` missing `market_type`
