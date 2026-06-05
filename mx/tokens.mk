@@ -80,3 +80,85 @@ market-tokens: preflight
 tokens:
 	@test -f "$(TOKEN_ENV)" || { printf 'Missing %s. Run make token-bootstrap first.\n' "$(TOKEN_ENV)"; exit 1; }
 	@sed -n '1,220p' "$(TOKEN_ENV)"
+
+# ── Native Soroban test-token + faucet workflows ─────────────────────────────
+#
+# These targets deploy the repo-local mintable test_token contract rather than
+# Stellar classic assets / SACs. They are useful for app demos and faucets. For
+# mainnet collateral, use real SAC IDs instead.
+
+TOKEN_NAME ?= Test $(CODE)
+TOKEN_DECIMALS ?= 7
+CLAIM_AMOUNT ?= 1000000000
+FAUCET_COOLDOWN ?= 17280
+FAUCET ?=
+
+.PHONY: faucet-deploy test-token-deploy faucet-add-token faucet-claim faucet-claim-market test-tokens-with-faucet
+
+faucet-deploy: preflight build
+	@mkdir -p "$(DEPLOY_DIR)"
+	admin_addr="$$(stellar keys address "$(SOURCE)")"
+	wasm_hash="$$(stellar contract upload --wasm "$(WASM_DIR)/test_faucet.wasm" --source "$(SOURCE)" --network "$(NETWORK)")"
+	faucet_id="$$(stellar contract deploy --wasm-hash "$$wasm_hash" --source "$(SOURCE)" --network "$(NETWORK)")"
+	stellar contract invoke \
+		--id "$$faucet_id" \
+		--source "$(SOURCE)" \
+		--network "$(NETWORK)" \
+		-- initialize --admin "$$admin_addr" --cooldown_ledgers "$(FAUCET_COOLDOWN)" >/dev/null
+	printf 'FAUCET=%s\n' "$$faucet_id" >> "$(TOKEN_ENV)"
+	printf '%s\n' "$$faucet_id"
+
+test-token-deploy: preflight build
+	@test -n "$(FAUCET)" || { printf '%s\n' 'Usage: make test-token-deploy CODE=TWBTC FAUCET=C... NETWORK=testnet SOURCE=alice'; exit 1; }
+	@mkdir -p "$(DEPLOY_DIR)"
+	wasm_hash="$$(stellar contract upload --wasm "$(WASM_DIR)/test_token.wasm" --source "$(SOURCE)" --network "$(NETWORK)")"
+	token_id="$$(stellar contract deploy --wasm-hash "$$wasm_hash" --source "$(SOURCE)" --network "$(NETWORK)")"
+	stellar contract invoke \
+		--id "$$token_id" \
+		--source "$(SOURCE)" \
+		--network "$(NETWORK)" \
+		-- initialize --owner "$(FAUCET)" --decimal "$(TOKEN_DECIMALS)" --name "$(TOKEN_NAME)" --symbol "$(CODE)" >/dev/null
+	printf '%s=%s\n' "$(CODE)" "$$token_id" >> "$(TOKEN_ENV)"
+	printf '%s_NATIVE=%s\n' "$(CODE)" "$$token_id" >> "$(TOKEN_ENV)"
+	printf '%s\n' "$$token_id"
+
+faucet-add-token: preflight
+	@test -n "$(FAUCET)" || { printf '%s\n' 'Usage: make faucet-add-token FAUCET=C... TOKEN=C... CLAIM_AMOUNT=1000000000'; exit 1; }
+	@test -n "$(TOKEN)" || { printf '%s\n' 'Usage: make faucet-add-token FAUCET=C... TOKEN=C... CLAIM_AMOUNT=1000000000'; exit 1; }
+	admin_addr="$$(stellar keys address "$(SOURCE)")"
+	stellar contract invoke \
+		--id "$(FAUCET)" \
+		--source "$(SOURCE)" \
+		--network "$(NETWORK)" \
+		-- set_token --caller "$$admin_addr" --token "$(TOKEN)" --claim_amount "$(CLAIM_AMOUNT)"
+
+faucet-claim: preflight
+	@test -n "$(FAUCET)" || { printf '%s\n' 'Usage: make faucet-claim FAUCET=C... TOKEN=C... TO=alice NETWORK=testnet SOURCE=alice'; exit 1; }
+	@test -n "$(TOKEN)" || { printf '%s\n' 'Usage: make faucet-claim FAUCET=C... TOKEN=C... TO=alice NETWORK=testnet SOURCE=alice'; exit 1; }
+	to_addr="$$(stellar keys address "$(TO)" 2>/dev/null || printf '%s' "$(TO)")"
+	stellar contract invoke \
+		--id "$(FAUCET)" \
+		--source "$(TO)" \
+		--network "$(NETWORK)" \
+		-- claim --account "$$to_addr" --token "$(TOKEN)"
+
+faucet-claim-market: preflight
+	@test -f "$(TOKEN_ENV)" || { printf 'Missing %s. Run make test-tokens-with-faucet first.\n' "$(TOKEN_ENV)"; exit 1; }
+	@. "$(TOKEN_ENV)"; \
+	test -n "$$FAUCET" || { printf 'FAUCET not set in %s.\n' "$(TOKEN_ENV)"; exit 1; }; \
+	test -n "$$$(LONG_CODE)" || { printf '$(LONG_CODE) not set in %s.\n' "$(TOKEN_ENV)"; exit 1; }; \
+	test -n "$$$(SHORT_CODE)" || { printf '$(SHORT_CODE) not set in %s.\n' "$(TOKEN_ENV)"; exit 1; }; \
+	$(MAKE) faucet-claim FAUCET="$$FAUCET" TOKEN="$$$(LONG_CODE)" TO="$(TO)" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)"; \
+	$(MAKE) faucet-claim FAUCET="$$FAUCET" TOKEN="$$$(SHORT_CODE)" TO="$(TO)" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)"
+
+test-tokens-with-faucet: preflight
+	@mkdir -p "$(DEPLOY_DIR)"
+	faucet_id="$$($(MAKE) --no-print-directory faucet-deploy NETWORK="$(NETWORK)" SOURCE="$(SOURCE)" FAUCET_COOLDOWN="$(FAUCET_COOLDOWN)" | tail -n 1)"
+	long_id="$$($(MAKE) --no-print-directory test-token-deploy CODE="$(LONG_CODE)" TOKEN_NAME="Test $(LONG_CODE)" TOKEN_DECIMALS="$(TOKEN_DECIMALS)" FAUCET="$$faucet_id" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)" | tail -n 1)"
+	short_id="$$($(MAKE) --no-print-directory test-token-deploy CODE="$(SHORT_CODE)" TOKEN_NAME="Test $(SHORT_CODE)" TOKEN_DECIMALS="$(TOKEN_DECIMALS)" FAUCET="$$faucet_id" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)" | tail -n 1)"
+	$(MAKE) --no-print-directory faucet-add-token FAUCET="$$faucet_id" TOKEN="$$long_id" CLAIM_AMOUNT="$(CLAIM_AMOUNT)" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)"
+	$(MAKE) --no-print-directory faucet-add-token FAUCET="$$faucet_id" TOKEN="$$short_id" CLAIM_AMOUNT="$(CLAIM_AMOUNT)" NETWORK="$(NETWORK)" SOURCE="$(SOURCE)"
+	@printf 'Native test tokens ready:\n'
+	@printf '  FAUCET=%s\n' "$$faucet_id"
+	@printf '  $(LONG_CODE)=%s\n' "$$long_id"
+	@printf '  $(SHORT_CODE)=%s\n' "$$short_id"

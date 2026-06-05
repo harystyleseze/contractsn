@@ -43,6 +43,29 @@ make testnet-smoke NETWORK=testnet SOURCE=steins-testnet
 Use `deploy-force` only when you intentionally want new contract IDs and want to
 overwrite `.deployed/testnet.env`. For normal code changes, use upgrades below.
 
+### Testnet with faucet-owned native tokens
+
+Use this path when you want users to claim demo collateral themselves. It deploys
+the repo-local `test_token` contracts and a `test_faucet` contract before the
+GMX-style protocol graph:
+
+```sh
+make test-tokens-with-faucet NETWORK=testnet SOURCE=steins-testnet LONG_CODE=TWBTC SHORT_CODE=TUSDC
+make deploy-force NETWORK=testnet SOURCE=steins-testnet
+make bootstrap NETWORK=testnet SOURCE=steins-testnet LONG_CODE=TWBTC SHORT_CODE=TUSDC
+make addresses NETWORK=testnet
+```
+
+After that, users can claim:
+
+```sh
+make faucet-claim-market NETWORK=testnet SOURCE=steins-testnet TO=<stellar-key-or-G-address> \
+  LONG_CODE=TWBTC SHORT_CODE=TUSDC
+```
+
+The faucet deployment writes `FAUCET`, `TWBTC`, and `TUSDC` to
+`.deployed/tokens-testnet.env`, which `bootstrap` already reads.
+
 ---
 
 ## Testnet upgrade

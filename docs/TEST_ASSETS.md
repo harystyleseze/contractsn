@@ -22,6 +22,72 @@ All test assets use Stellar's standard 7-decimal precision for consistency with 
 
 ## Creating Test Assets
 
+You now have two supported test-asset paths:
+
+1. **SAC test assets** using Stellar classic assets. This is closest to
+   real-world collateral plumbing and remains the default market bootstrap path.
+2. **Native mintable test tokens** using this repo's `test_token` contract plus
+   `test_faucet`. This is best for demos, app testing, and user self-service
+   claims on testnet.
+
+Do not use either path for mainnet collateral.
+
+## Native Faucet Tokens
+
+Deploy a faucet plus TWBTC/TUSDC native test-token contracts:
+
+```bash
+make test-tokens-with-faucet NETWORK=testnet SOURCE=alice LONG_CODE=TWBTC SHORT_CODE=TUSDC
+```
+
+This will:
+
+1. Deploy `test_faucet`
+2. Deploy one `test_token` instance per symbol
+3. Initialize each token with the faucet contract as owner
+4. Configure the faucet claim amount for both tokens
+5. Save `FAUCET`, `TWBTC`, `TUSDC`, and `*_NATIVE` IDs to
+   `.deployed/tokens-testnet.env`
+
+Useful overrides:
+
+```bash
+make test-tokens-with-faucet \
+  NETWORK=testnet \
+  SOURCE=alice \
+  LONG_CODE=TWBTC \
+  SHORT_CODE=TUSDC \
+  CLAIM_AMOUNT=1000000000 \
+  FAUCET_COOLDOWN=17280
+```
+
+`CLAIM_AMOUNT` is in base units. With 7 decimals, `1000000000` is 100 tokens.
+`FAUCET_COOLDOWN` is measured in ledgers.
+
+Users can claim both market tokens after the faucet is deployed:
+
+```bash
+make faucet-claim-market NETWORK=testnet SOURCE=alice TO=bob LONG_CODE=TWBTC SHORT_CODE=TUSDC
+```
+
+Or claim one token directly:
+
+```bash
+make faucet-claim FAUCET=C... TOKEN=C... TO=bob NETWORK=testnet SOURCE=alice
+```
+
+To use native faucet tokens for market bootstrap, run the native token setup
+first, then use the normal protocol deployment/bootstrap commands. The bootstrap
+script reads the same `.deployed/tokens-testnet.env` file.
+
+```bash
+make test-tokens-with-faucet NETWORK=testnet SOURCE=alice LONG_CODE=TWBTC SHORT_CODE=TUSDC
+make deploy-force NETWORK=testnet SOURCE=alice
+make bootstrap NETWORK=testnet SOURCE=alice LONG_CODE=TWBTC SHORT_CODE=TUSDC
+```
+
+## SAC Test Assets
+
 ### Quick Start (Both Tokens)
 
 Create both TWBTC and TUSDC in one command:
