@@ -59,7 +59,7 @@ pub fn swap(
     } else if token_in == &market.short_token {
         market.long_token.clone()
     } else {
-        soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(1));
+        panic!("invalid token_in: not long or short token of market");
     };
 
     // 2. Read prices from oracle
@@ -123,7 +123,7 @@ pub fn swap_with_path(
         if raw == 0 { 3 } else { raw } // default to 3 if not configured
     };
     if path.len() as usize > max_len {
-        soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(2));
+        panic!("swap path length exceeds maximum");
     }
 
     // 2. Walk the path

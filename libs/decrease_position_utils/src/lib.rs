@@ -15,7 +15,15 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 #![allow(deprecated)]
 
-use soroban_sdk::{contracttype, Address, BytesN, Env};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, Env};
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum DecreasePositionError {
+    PriceTooLow  = 1,
+    PriceTooHigh = 2,
+}
 use gmx_types::{MarketProps, PositionProps, PriceProps, DecreasePositionResult};
 use gmx_math::{TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
@@ -112,10 +120,10 @@ pub fn decrease_position(env: &Env, p: &DecreasePositionParams) -> DecreasePosit
     let execution_price = get_execution_price(env, index_price_mid, size_delta_usd, impact_usd, p.is_long, false);
     if p.acceptable_price != 0 {
         if p.is_long  && execution_price < p.acceptable_price {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(1));
+            soroban_sdk::panic_with_error!(env, DecreasePositionError::PriceTooLow);
         }
         if !p.is_long && execution_price > p.acceptable_price {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(2));
+            soroban_sdk::panic_with_error!(env, DecreasePositionError::PriceTooHigh);
         }
     }
 

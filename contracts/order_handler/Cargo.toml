@@ -27,3 +27,8 @@ oracle         = { path = "../oracle" }
 order-vault    = { path = "../order_vault" }
 market-token   = { path = "../market_token" }
 market-factory = { path = "../market_factory" }
+criterion      = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "order_execution"
+harness = false
