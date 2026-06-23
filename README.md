@@ -1217,6 +1217,8 @@ This matrix maps every contract under `contracts/*` to its state ownership, init
 
 Definitions for every domain term used throughout the codebase and issue tracker.
 New contributors should read this before working on math, risk, or fee logic.
+Storage contributors should also read the [Soroban TTL and rent strategy](docs/ttl-strategy.md),
+which records the current bump policy and known renewal gaps.
 
 | Term | Definition |
 |---|---|
