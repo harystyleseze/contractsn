@@ -105,6 +105,7 @@ pub struct PositionProps {
 // ─── Orders ──────────────────────────────────────────────────────────────────
 
 /// Mirrors GMX's Order.OrderType.
+#[derive(Clone, Copy)]
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrderType {
