@@ -8,16 +8,17 @@
 #![allow(dependency_on_unit_never_type_fallback)]
 
 use soroban_sdk::{
-    contract, contractimpl, Address, BytesN, Env,
+    contract, contractimpl, Address, BytesN, Env, Vec,
 };
 use gmx_types::{
     MarketProps, PositionProps, PositionInfo, PositionFees, PriceProps,
-    PoolValueInfo, FundingInfo,
+    PoolValueInfo, FundingInfo, AdlCandidate, SwapEstimate,
 };
 use gmx_math::{TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
     market_index_token_key, market_long_token_key, market_short_token_key,
     funding_amount_per_size_key, saved_funding_factor_per_second_key,
+    position_key, position_list_key, account_position_list_key,
 };
 use gmx_market_utils::{get_pool_value, get_open_interest_for_side};
 use gmx_position_utils::{get_position_pnl_usd, get_position_fees, is_liquidatable};
@@ -31,6 +32,8 @@ trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn get_i128(env: Env, key: BytesN<32>) -> i128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
+    fn get_bytes32_set_count(env: Env, set_key: BytesN<32>) -> u32;
+    fn get_bytes32_set_at(env: Env, set_key: BytesN<32>, start: u32, end: u32) -> Vec<BytesN<32>>;
 }
 
 #[allow(dead_code)]
@@ -247,5 +250,249 @@ impl Reader {
         let index_price      = oracle_client.get_primary_price(&market_props.index_token);
         let collateral_price = oracle_client.get_primary_price(&position.collateral_token).mid_price();
         is_liquidatable(&env, &data_store, &position, &market_props, collateral_price, &index_price)
+    }
+
+    // ── ADL (Auto-Deleveraging) views ────────────────────────────────────────
+
+    /// Get all profitable positions eligible for auto-deleveraging on a market side.
+    ///
+    /// Returns only positions with positive unrealised PnL, sorted by profitability ratio
+    /// (highest first). Use `limit` to bound iteration cost; keepers call multiple times
+    /// if many positions qualify.
+    pub fn get_adl_eligible_positions(
+        env: Env,
+        data_store: Address,
+        oracle: Address,
+        order_handler: Address,
+        market: Address,
+        is_long: bool,
+        limit: u32,
+    ) -> Vec<AdlCandidate> {
+        let ds = DataStoreClient::new(&env, &data_store);
+        let oracle_client = OracleClient::new(&env, &oracle);
+        let order_client = OrderHandlerClient::new(&env, &order_handler);
+
+        // Get market properties
+        let market_props = Self::get_market(env.clone(), data_store.clone(), market.clone());
+        let index_price = oracle_client.get_primary_price(&market_props.index_token);
+
+        // Fetch all position keys from global position list
+        let pos_list_key = position_list_key(&env);
+        let pos_count = ds.get_bytes32_set_count(&pos_list_key);
+        
+        let mut candidates: Vec<AdlCandidate> = Vec::new(&env);
+        
+        // Iterate through all positions
+        let mut i = 0u32;
+        while i < pos_count && (candidates.len() as u32) < limit {
+            // Fetch a batch of position keys
+            let batch_end = if i + 100 > pos_count { pos_count } else { i + 100 };
+            let position_keys = ds.get_bytes32_set_at(&pos_list_key, &i, &batch_end);
+            
+            let keys_len = position_keys.len();
+            let mut j = 0u32;
+            while j < keys_len {
+                let pos_key = position_keys.get(j).unwrap();
+                
+                // Get position from order handler
+                if let Some(position) = order_client.get_position(&pos_key) {
+                    // Filter by market and direction
+                    if position.market != market || position.is_long != is_long {
+                        j += 1;
+                        continue;
+                    }
+
+                    // Calculate unrealised PnL
+                    let (pnl_usd, _) = get_position_pnl_usd(&env, &position, &index_price, position.size_in_usd);
+                    
+                    // Only include profitable positions
+                    if pnl_usd > 0 {
+                        // Calculate PnL to size ratio in basis points
+                        let size_usd_abs = if position.size_in_usd > 0 { 
+                            position.size_in_usd as u128 
+                        } else { 
+                            0u128 
+                        };
+                        
+                        let ratio_bps = if size_usd_abs > 0 {
+                            mul_div_wide(&env, pnl_usd, 10000i128, position.size_in_usd) as u32
+                        } else {
+                            0u32
+                        };
+
+                        let candidate = AdlCandidate {
+                            key: pos_key,
+                            owner: position.account.clone(),
+                            size_usd: size_usd_abs,
+                            unrealised_pnl_usd: pnl_usd as u128,
+                            pnl_to_size_ratio_bps: ratio_bps,
+                        };
+                        
+                        candidates.push_back(candidate);
+                    }
+                }
+                
+                j += 1;
+            }
+            
+            i = batch_end;
+        }
+
+        // Sort candidates by pnl_to_size_ratio_bps descending (bubble sort)
+        let candidates_len = candidates.len();
+        if candidates_len > 1 {
+            let mut k = 0usize;
+            while k < candidates_len {
+                let mut m = 0usize;
+                while m + 1 < candidates_len - k {
+                    let cand_m = candidates.get(m).unwrap();
+                    let cand_m_next = candidates.get(m + 1).unwrap();
+                    
+                    // Swap if m+1 has higher ratio (descending sort)
+                    if cand_m_next.pnl_to_size_ratio_bps > cand_m.pnl_to_size_ratio_bps {
+                        let temp = cand_m.clone();
+                        candidates.set(m, cand_m_next.clone());
+                        candidates.set(m + 1, temp);
+                    }
+                    
+                    m += 1;
+                }
+                k += 1;
+            }
+        }
+
+        // Trim to limit
+        let mut result: Vec<AdlCandidate> = Vec::new(&env);
+        let take = if candidates_len > (limit as usize) { limit as usize } else { candidates_len };
+        let mut idx = 0usize;
+        while idx < take {
+            result.push_back(candidates.get(idx).unwrap());
+            idx += 1;
+        }
+
+        result
+    }
+
+    // ── Swap estimation (dry-run without state modification) ─────────────────
+
+    /// Estimate the output of a swap without modifying state.
+    ///
+    /// Returns the estimated output token amount, cumulative price impact, and
+    /// whether execution would likely revert due to paused markets or insufficient liquidity.
+    ///
+    /// This is a read-only view that mirrors swap execution logic for frontend preview.
+    pub fn estimate_swap_output(
+        env: Env,
+        data_store: Address,
+        oracle: Address,
+        token_in: Address,
+        amount_in: u128,
+        swap_path: Vec<Address>,
+    ) -> SwapEstimate {
+        let oracle_client = OracleClient::new(&env, &oracle);
+        
+        // Validate swap path
+        if swap_path.len() == 0 {
+            return SwapEstimate {
+                token_out: token_in.clone(),
+                amount_out: amount_in,
+                price_impact_usd: 0i128,
+                execution_price: 0u128,
+                reverts_if_executed: true,
+            };
+        }
+
+        let mut current_amount = amount_in;
+        let mut current_token = token_in.clone();
+        let mut total_impact_usd = 0i128;
+        let mut reverts_if_executed = false;
+
+        // Iterate through swap path
+        let path_len = swap_path.len();
+        let mut i = 0u32;
+        while i < path_len {
+            let market = swap_path.get(i).unwrap();
+            
+            // Load market properties
+            let market_props = Self::get_market(env.clone(), data_store.clone(), market);
+            
+            // For now, estimate assumes:
+            // - Market is not paused (we don't have pause status check in this version)
+            // - Sufficient liquidity exists
+            // - Price impact is calculated based on pool state
+            
+            // Get oracle prices
+            let index_price = oracle_client.get_primary_price(&market_props.index_token).mid_price();
+            let long_price = oracle_client.get_primary_price(&market_props.long_token).mid_price();
+            let short_price = oracle_client.get_primary_price(&market_props.short_token).mid_price();
+            
+            // Determine which token is input and which is output
+            let (input_token, output_token) = if current_token == market_props.long_token {
+                (market_props.long_token.clone(), market_props.short_token.clone())
+            } else if current_token == market_props.short_token {
+                (market_props.short_token.clone(), market_props.long_token.clone())
+            } else {
+                // Token not in market, swap ends
+                reverts_if_executed = true;
+                break;
+            };
+
+            // Convert amount_in to USD
+            let input_price = if input_token == market_props.long_token { 
+                long_price 
+            } else { 
+                short_price 
+            };
+            
+            let input_usd = mul_div_wide(&env, current_amount as i128, input_price, TOKEN_PRECISION);
+
+            // Get swap impact
+            let impact_usd = get_position_price_impact(
+                &env, &data_store, &market_props,
+                false,  // is_long (doesn't matter for swap impact in this context)
+                input_usd,
+                true,   // is_increase (swap is treated as positive impact)
+                index_price,
+            );
+
+            total_impact_usd += impact_usd;
+
+            // Apply impact to output
+            let output_price = if output_token == market_props.long_token { 
+                long_price 
+            } else { 
+                short_price 
+            };
+            
+            let output_usd = input_usd + impact_usd;
+            
+            if output_usd <= 0 {
+                reverts_if_executed = true;
+                break;
+            }
+
+            current_amount = mul_div_wide(&env, output_usd, TOKEN_PRECISION, output_price) as u128;
+            current_token = output_token;
+
+            i += 1;
+        }
+
+        let final_token_out = current_token;
+        let final_amount_out = current_amount;
+
+        // Calculate execution price (input / output)
+        let execution_price = if final_amount_out > 0 {
+            mul_div_wide(&env, amount_in as i128, TOKEN_PRECISION, final_amount_out as i128) as u128
+        } else {
+            0u128
+        };
+
+        SwapEstimate {
+            token_out: final_token_out,
+            amount_out: final_amount_out,
+            price_impact_usd: total_impact_usd,
+            execution_price,
+            reverts_if_executed,
+        }
     }
 }

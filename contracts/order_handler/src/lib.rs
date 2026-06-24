@@ -26,6 +26,7 @@ use gmx_keys::{
     roles,
     order_key, order_list_key, account_order_list_key,
     market_index_token_key, market_long_token_key, market_short_token_key,
+    liquidation_execution_fee_key,
 };
 use gmx_increase_position_utils::{IncreasePositionParams, increase_position};
 use gmx_decrease_position_utils::{DecreasePositionParams, decrease_position};
@@ -63,6 +64,7 @@ pub enum Error {
     /// order_vault (via exchange_router SendTokens) before calling create_order.
     /// record_transfer_in returned zero, meaning no collateral arrived.
     ZeroCollateral        = 10,
+    UnauthorizedPositionManager = 11,  // Caller is neither owner nor authorized manager
 }
 
 // ─── External contract clients ────────────────────────────────────────────────
@@ -96,6 +98,13 @@ trait IOracle {
 trait IOrderVault {
     fn record_transfer_in(env: Env, token: Address) -> i128;
     fn transfer_out(env: Env, caller: Address, token: Address, receiver: Address, amount: i128);
+}
+
+#[allow(dead_code)]
+#[soroban_sdk::contractclient(name = "DataStoreClient")]
+trait IDataStore {
+    fn get_position_manager(env: Env, owner: Address, market: Address) -> Option<Address>;
+    fn get_u128(env: Env, key: BytesN<32>) -> u128;
 }
 
 // ─── Position storage key (must match increase/decrease position utils) ───────
@@ -201,6 +210,34 @@ impl OrderHandler {
             OrderType::MarketIncrease | OrderType::LimitIncrease | OrderType::StopIncrease |
             OrderType::MarketSwap     | OrderType::LimitSwap
         );
+        
+        // Determine if this is a position order (increase/decrease)
+        let is_position_order = matches!(
+            params.order_type,
+            OrderType::MarketIncrease | OrderType::LimitIncrease | OrderType::StopIncrease |
+            OrderType::MarketDecrease | OrderType::LimitDecrease | OrderType::StopLossDecrease
+        );
+
+        // Position manager authorization: 
+        // For position orders, verify caller is either the owner OR an authorized manager for this market.
+        // If caller is a manager, receiver must be the owner (cannot redirect funds).
+        let (actual_owner, actual_receiver) = if is_position_order {
+            // Check if caller is an authorized manager for this market
+            match ds.get_position_manager(&caller, &params.market) {
+                Some(owner) => {
+                    // Caller is a manager; position owner is stored in data_store
+                    // Receiver must be the owner (cannot redirect)
+                    (owner.clone(), owner)
+                }
+                None => {
+                    // Caller is not a manager; must be the owner
+                    (caller.clone(), params.receiver)
+                }
+            }
+        } else {
+            // For swap orders, no position manager check needed
+            (caller.clone(), params.receiver)
+        };
 
         // Snapshot vault balance and derive received amount (canonical model — issue #47).
         // Reverts with ZeroCollateral if caller skipped the SendTokens pre-step.
@@ -221,8 +258,8 @@ impl OrderHandler {
         let key = order_key(&env, nonce);
 
         let order = OrderProps {
-            account:                  caller.clone(),
-            receiver:                 params.receiver,
+            account:                  actual_owner.clone(),  // Always the position owner
+            receiver:                 actual_receiver,       // Enforced to be owner for position orders
             market:                   params.market.clone(),
             initial_collateral_token: params.initial_collateral_token,
             swap_path:                params.swap_path,
@@ -240,9 +277,9 @@ impl OrderHandler {
         env.storage().persistent().set(&OrderStorageKey::Order(key.clone()), &order);
 
         ds.add_bytes32_to_set(&handler, &order_list_key(&env), &key);
-        ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &caller), &key);
+        ds.add_bytes32_to_set(&handler, &account_order_list_key(&env, &actual_owner), &key);
 
-        env.events().publish((symbol_short!("ord_crt"),), (key.clone(), caller, params.market));
+        env.events().publish((symbol_short!("ord_crt"),), (key.clone(), actual_owner, params.market));
         key
     }
 
@@ -496,6 +533,8 @@ impl OrderHandler {
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let oracle: Address = env.storage().instance().get(&InstanceKey::Oracle)
             .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+        let order_vault: Address = env.storage().instance().get(&InstanceKey::OrderVault)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
         let handler = env.current_contract_address();
 
         let market_props = load_market_props(&env, &data_store, &market);
@@ -515,6 +554,31 @@ impl OrderHandler {
             &env, &data_store, &position, &market_props, collateral_price, &index_price,
         ) {
             panic_with_error!(&env, Error::InvalidOrderType);
+        }
+
+        // Handle keeper execution fee (feature #208): deduct from position collateral first
+        let ds = DataStoreClient::new(&env, &data_store);
+        let keeper_fee_key = liquidation_execution_fee_key(&market);
+        let keeper_execution_fee = ds.get_u128(&keeper_fee_key);
+
+        if keeper_execution_fee > 0 {
+            // Keeper fee is deducted from position collateral.
+            // Transfer fee from order_vault to keeper.
+            // If position doesn't have enough collateral, take what's available.
+            let fee_to_transfer = if keeper_execution_fee <= position.collateral_amount {
+                keeper_execution_fee
+            } else {
+                position.collateral_amount
+            };
+
+            if fee_to_transfer > 0 {
+                OrderVaultClient::new(&env, &order_vault).transfer_out(
+                    &handler,
+                    &collateral_token,
+                    &keeper,
+                    fee_to_transfer as i128,
+                );
+            }
         }
 
         let result = decrease_position(&env, &DecreasePositionParams {

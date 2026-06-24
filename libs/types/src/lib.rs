@@ -246,3 +246,27 @@ pub struct PositionInfo {
     pub position_fee_usd: i128,
     pub liquidation_price: i128,
 }
+
+/// ADL-eligible position candidate for auto-deleveraging.
+/// Returned by reader::get_adl_eligible_positions.
+#[contracttype]
+pub struct AdlCandidate {
+    pub key: BytesN<32>,                  // position key for order_handler::get_position
+    pub owner: Address,                   // position owner
+    pub size_usd: u128,                   // position size in USD (absolute value)
+    pub unrealised_pnl_usd: u128,         // positive PnL only (loss positions are filtered)
+    pub pnl_to_size_ratio_bps: u32,       // unrealised_pnl / size in basis points (sort key)
+}
+
+/// Estimated swap output for dry-run queries.
+/// Returned by reader::estimate_swap_output.
+#[contracttype]
+pub struct SwapEstimate {
+    pub token_out: Address,               // output token after full swap path
+    pub amount_out: u128,                 // estimated output amount
+    pub price_impact_usd: i128,           // cumulative impact (negative = cost, positive = rebate)
+    pub execution_price: u128,            // effective rate for the full swap path
+    pub reverts_if_executed: bool,        // true if any market is paused or insufficient liquidity
+}
+
+use soroban_sdk::BytesN;

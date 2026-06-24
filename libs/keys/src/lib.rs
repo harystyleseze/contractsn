@@ -620,6 +620,23 @@ pub fn is_adl_enabled_key(env: &Env, market: &Address, is_long: bool) -> BytesN<
 }
 
 /// Max PnL factor for ADL triggering
+/// sha256("POSITION_MANAGER" ‖ owner ‖ market)
+pub fn position_manager_key(env: &Env, owner: &Address, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "POSITION_MANAGER");
+    push_addr(&mut b, env, owner);
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
+/// sha256("LIQUIDATION_EXECUTION_FEE" ‖ market)
+pub fn liquidation_execution_fee_key(env: &Env, market: &Address) -> BytesN<32> {
+    let mut b = Bytes::new(env);
+    push_str(&mut b, env, "LIQUIDATION_EXECUTION_FEE");
+    push_addr(&mut b, env, market);
+    sha256(env, &b)
+}
+
 pub fn max_pnl_factor_for_adl_key(env: &Env, market: &Address, is_long: bool) -> BytesN<32> {
     let mut b = Bytes::new(env);
     push_str(&mut b, env, "MAX_PNL_FACTOR_FOR_ADL");
