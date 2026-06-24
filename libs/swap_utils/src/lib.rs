@@ -9,7 +9,15 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{Address, BytesN, Env, Vec};
+use soroban_sdk::{contracterror, panic_with_error, Address, BytesN, Env, Vec};
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+enum SwapError {
+    InvalidTokenIn    = 1,
+    PathTooLong       = 2,
+}
 use gmx_types::{MarketProps, PriceProps};
 use gmx_keys::{
     market_long_token_key, market_short_token_key,
@@ -59,7 +67,7 @@ pub fn swap(
     } else if token_in == &market.short_token {
         market.long_token.clone()
     } else {
-        soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(1));
+        panic_with_error!(env, SwapError::InvalidTokenIn);
     };
 
     // 2. Read prices from oracle
@@ -123,7 +131,7 @@ pub fn swap_with_path(
         if raw == 0 { 3 } else { raw } // default to 3 if not configured
     };
     if path.len() as usize > max_len {
-        soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(2));
+        panic_with_error!(env, SwapError::PathTooLong);
     }
 
     // 2. Walk the path

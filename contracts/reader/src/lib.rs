@@ -12,12 +12,13 @@ use soroban_sdk::{
 };
 use gmx_types::{
     MarketProps, PositionProps, PositionInfo, PositionFees, PriceProps,
-    PoolValueInfo, FundingInfo,
+    PoolValueInfo, FundingInfo, FundingRateInfo,
 };
 use gmx_math::{TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
     market_index_token_key, market_long_token_key, market_short_token_key,
     funding_amount_per_size_key, saved_funding_factor_per_second_key,
+    funding_updated_at_key,
 };
 use gmx_market_utils::{get_pool_value, get_open_interest_for_side};
 use gmx_position_utils::{get_position_pnl_usd, get_position_fees, is_liquidatable};
@@ -101,7 +102,6 @@ impl Reader {
         let funding_factor_per_second = ds.get_i128(
             &saved_funding_factor_per_second_key(&env, &market_token)
         );
-        // Long side tracks funding in long_token collateral; short in short_token
         let long_funding_amount_per_size = ds.get_i128(
             &funding_amount_per_size_key(&env, &market_token, &market.long_token, true)
         );
@@ -113,6 +113,52 @@ impl Reader {
             funding_factor_per_second,
             long_funding_amount_per_size,
             short_funding_amount_per_size,
+        }
+    }
+
+    /// Get per-hour funding rates and open interest for frontend display (issue #207).
+    ///
+    /// Stellar produces ~720 ledgers/hour at 5 s/ledger, so:
+    ///   rate_per_hour = saved_funding_factor_per_second × 720
+    /// Long pays short when long OI > short OI, so short_rate = -long_rate.
+    pub fn get_funding_rate_info(
+        env: Env,
+        data_store: Address,
+        market_token: Address,
+    ) -> FundingRateInfo {
+        let market = Self::get_market(env.clone(), data_store.clone(), market_token.clone());
+        let ds = DataStoreClient::new(&env, &data_store);
+
+        let funding_factor_per_second = ds.get_i128(
+            &saved_funding_factor_per_second_key(&env, &market_token)
+        );
+        let long_funding_amount_per_size = ds.get_i128(
+            &funding_amount_per_size_key(&env, &market_token, &market.long_token, true)
+        );
+        let short_funding_amount_per_size = ds.get_i128(
+            &funding_amount_per_size_key(&env, &market_token, &market.short_token, false)
+        );
+        let funding_updated_at_ledger = ds.get_u128(
+            &funding_updated_at_key(&env, &market_token)
+        ) as u64;
+
+        let long_open_interest_usd = get_open_interest_for_side(&env, &data_store, &market, true);
+        let short_open_interest_usd = get_open_interest_for_side(&env, &data_store, &market, false);
+
+        // 720 ledgers per hour (5 s / ledger × 720 = 3 600 s = 1 hr)
+        const LEDGERS_PER_HOUR: i128 = 720;
+        let long_funding_rate_per_hour = funding_factor_per_second.saturating_mul(LEDGERS_PER_HOUR);
+        // Conservation: what longs pay, shorts receive (and vice versa)
+        let short_funding_rate_per_hour = long_funding_rate_per_hour.saturating_neg();
+
+        FundingRateInfo {
+            long_funding_rate_per_hour,
+            short_funding_rate_per_hour,
+            long_funding_amount_per_size,
+            short_funding_amount_per_size,
+            funding_updated_at_ledger,
+            long_open_interest_usd,
+            short_open_interest_usd,
         }
     }
 

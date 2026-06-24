@@ -3,7 +3,16 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{Address, BytesN, Env};
+use soroban_sdk::{contracterror, panic_with_error, Address, BytesN, Env};
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+enum PositionError {
+    BelowMinCollateral  = 1,
+    ExceedsMaxLeverage  = 2,
+    ExceedsMaxOI        = 3,
+}
 use gmx_types::{MarketProps, PositionProps, PositionFees, PriceProps};
 use gmx_math::{FLOAT_PRECISION, TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
@@ -193,7 +202,7 @@ pub fn validate_position(
     if min_collateral_factor > 0 {
         let required_min = mul_div_wide(env, position.size_in_usd, min_collateral_factor, FLOAT_PRECISION);
         if collateral_usd < required_min {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(1));
+            panic_with_error!(env, PositionError::BelowMinCollateral);
         }
     }
 
@@ -203,13 +212,13 @@ pub fn validate_position(
     if max_leverage > 0 && collateral_usd > 0 {
         let effective_leverage = mul_div_wide(env, position.size_in_usd, FLOAT_PRECISION, collateral_usd);
         if effective_leverage > max_leverage {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(2));
+            panic_with_error!(env, PositionError::ExceedsMaxLeverage);
         }
     }
 
     // 3. OPEN INTEREST check
     if validate_open_interest(env, data_store, market, position.is_long).is_err() {
-        soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(3));
+        panic_with_error!(env, PositionError::ExceedsMaxOI);
     }
 }
 

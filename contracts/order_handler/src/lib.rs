@@ -20,17 +20,20 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, Address, BytesN, Env,
     symbol_short, panic_with_error,
 };
-use gmx_types::{MarketProps, OrderProps, OrderType, PriceProps};
+use gmx_types::{MarketProps, OrderProps, OrderType, PriceProps, PositionProps};
 pub use gmx_types::CreateOrderParams;
 use gmx_keys::{
     roles,
     order_key, order_list_key, account_order_list_key,
     market_index_token_key, market_long_token_key, market_short_token_key,
+    position_key, max_leverage_key, position_fee_factor_key,
+    fee_tier_volume_threshold_key, fee_tier_position_fee_factor_key,
+    trader_volume_key, trader_volume_window_start_key,
 };
+use gmx_math::{mul_div_wide, TOKEN_PRECISION, FLOAT_PRECISION};
 use gmx_increase_position_utils::{IncreasePositionParams, increase_position};
 use gmx_decrease_position_utils::{DecreasePositionParams, decrease_position};
 use gmx_swap_utils::swap_with_path;
-use gmx_types::PositionProps;
 
 // ─── Storage keys ─────────────────────────────────────────────────────────────
 
@@ -59,6 +62,7 @@ pub enum Error {
     PriceTooHigh          = 7,
     PriceTooLow           = 8,
     OrderFrozen           = 9,
+    MaxLeverageExceeded   = 10,
 }
 
 // ─── External contract clients ────────────────────────────────────────────────
@@ -73,10 +77,66 @@ trait IRoleStore {
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
+    fn set_u128(env: Env, caller: Address, key: BytesN<32>, value: u128) -> u128;
+    // Note: the generated client passes `value` by reference (&u128)
+    fn apply_delta_to_u128(env: Env, caller: Address, key: BytesN<32>, delta: i128) -> u128;
+    fn get_i128(env: Env, key: BytesN<32>) -> i128;
     fn increment_nonce(env: Env, caller: Address) -> u64;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
     fn add_bytes32_to_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
     fn remove_bytes32_from_set(env: Env, caller: Address, set_key: BytesN<32>, value: BytesN<32>);
+}
+
+// ─── Position event structs (issue #205) ──────────────────────────────────────
+
+#[contracttype]
+pub struct PositionOpenedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub size_in_usd: i128,
+    pub collateral_amount: i128,
+    pub is_long: bool,
+    pub avg_entry_price: i128,
+}
+
+#[contracttype]
+pub struct PositionIncreasedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub delta_size_usd: i128,
+    pub delta_collateral: i128,
+    pub new_size_usd: i128,
+    pub avg_entry_price: i128,
+}
+
+#[contracttype]
+pub struct PositionDecreasedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub delta_size_usd: i128,
+    pub pnl_usd: i128,
+    pub execution_price: i128,
+}
+
+#[contracttype]
+pub struct PositionClosedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub pnl_usd: i128,
+    pub execution_price: i128,
+}
+
+#[contracttype]
+pub struct PositionLiquidatedEvent {
+    pub key: BytesN<32>,
+    pub account: Address,
+    pub market: Address,
+    pub execution_price: i128,
+    pub remaining_collateral: i128,
 }
 
 #[allow(dead_code)]
@@ -241,6 +301,15 @@ impl OrderHandler {
             _ => {}
         }
 
+        let ds = DataStoreClient::new(&env, &data_store);
+
+        // ── Fee tier resolution (#204) ─────────────────────────────────────────
+        // Determine the trader's effective position fee factor from their tier.
+        // Tiers 0-4: tier 0 is default (no threshold), higher tiers require more volume.
+        let effective_fee_factor = resolve_fee_tier(
+            &env, &ds, &handler, &order.account, &order.market, order.size_delta_usd,
+        );
+
         // Dispatch by order type
         match order.order_type {
             OrderType::MarketSwap | OrderType::LimitSwap => {
@@ -273,7 +342,32 @@ impl OrderHandler {
                     &market.market_token,
                     &order.collateral_delta_amount,
                 );
-                increase_position(&env, &IncreasePositionParams {
+
+                // Apply tier fee override if trader qualified for a discount (#204)
+                let fee_key_pos = position_fee_factor_key(&env, &order.market, true);
+                let fee_key_neg = position_fee_factor_key(&env, &order.market, false);
+                let original_fee_pos = if effective_fee_factor > 0 {
+                    let orig = ds.get_u128(&fee_key_pos);
+                    ds.set_u128(&handler, &fee_key_pos, &effective_fee_factor);
+                    orig
+                } else { 0 };
+                let original_fee_neg = if effective_fee_factor > 0 {
+                    let orig = ds.get_u128(&fee_key_neg);
+                    ds.set_u128(&handler, &fee_key_neg, &effective_fee_factor);
+                    orig
+                } else { 0 };
+
+                // Capture pre-increase position state for event emission (#205)
+                let pos_key = position_key(&env, &order.account, &order.market, &order.initial_collateral_token, order.is_long);
+                let pre: Option<PositionProps> = env.storage().persistent()
+                    .get(&PositionStorageKey::Position(pos_key.clone()));
+                let (pre_size, pre_collateral) = pre
+                    .as_ref()
+                    .map(|p| (p.size_in_usd, p.collateral_amount))
+                    .unwrap_or((0, 0));
+                let is_new_position = pre_size == 0;
+
+                let updated = increase_position(&env, &IncreasePositionParams {
                     data_store:        &data_store,
                     caller:            &handler,
                     account:           &order.account,
@@ -288,11 +382,71 @@ impl OrderHandler {
                     collateral_price,
                     current_time:      env.ledger().timestamp(),
                 });
+
+                // Restore original fee factors after execution (#204)
+                if effective_fee_factor > 0 {
+                    ds.set_u128(&handler, &fee_key_pos, &original_fee_pos);
+                    ds.set_u128(&handler, &fee_key_neg, &original_fee_neg);
+                }
+
+                // Max leverage check (#206)
+                // max_leverage stored as BPS: 5000 = 50x. 0 = uncapped.
+                let max_leverage = ds.get_u128(&max_leverage_key(&env, &order.market));
+                if max_leverage > 0 && updated.collateral_amount > 0 {
+                    let collateral_usd = mul_div_wide(
+                        &env, updated.collateral_amount, collateral_price, TOKEN_PRECISION,
+                    );
+                    if collateral_usd > 0 {
+                        // effective_leverage_bps = size * 100 / collateral (both in FLOAT_PRECISION)
+                        let effective_bps = (updated.size_in_usd as u128)
+                            .saturating_mul(100)
+                            / (collateral_usd as u128);
+                        if effective_bps > max_leverage {
+                            panic_with_error!(&env, Error::MaxLeverageExceeded);
+                        }
+                    }
+                }
+
+                // Compute avg entry price for events (#205)
+                let avg_entry_price = if updated.size_in_tokens > 0 {
+                    mul_div_wide(&env, updated.size_in_usd, TOKEN_PRECISION, updated.size_in_tokens)
+                } else { 0 };
+
+                if is_new_position {
+                    env.events().publish(
+                        (symbol_short!("pos_open"),),
+                        PositionOpenedEvent {
+                            key: pos_key,
+                            account: order.account.clone(),
+                            market: order.market.clone(),
+                            size_in_usd: updated.size_in_usd,
+                            collateral_amount: updated.collateral_amount,
+                            is_long: order.is_long,
+                            avg_entry_price,
+                        },
+                    );
+                } else {
+                    env.events().publish(
+                        (symbol_short!("pos_inc"),),
+                        PositionIncreasedEvent {
+                            key: pos_key,
+                            account: order.account.clone(),
+                            market: order.market.clone(),
+                            delta_size_usd: updated.size_in_usd - pre_size,
+                            delta_collateral: updated.collateral_amount - pre_collateral,
+                            new_size_usd: updated.size_in_usd,
+                            avg_entry_price,
+                        },
+                    );
+                }
             }
 
             OrderType::MarketDecrease | OrderType::LimitDecrease |
             OrderType::StopLossDecrease | OrderType::Liquidation => {
-                decrease_position(&env, &DecreasePositionParams {
+                // Capture position key for events (#205)
+                let pos_key = position_key(&env, &order.account, &order.market, &order.initial_collateral_token, order.is_long);
+
+                let result = decrease_position(&env, &DecreasePositionParams {
                     data_store:        &data_store,
                     caller:            &handler,
                     account:           &order.account,
@@ -306,6 +460,32 @@ impl OrderHandler {
                     collateral_price,
                     current_time:      env.ledger().timestamp(),
                 });
+
+                // Emit position events (#205)
+                if result.is_fully_closed {
+                    env.events().publish(
+                        (symbol_short!("pos_cls"),),
+                        PositionClosedEvent {
+                            key: pos_key,
+                            account: order.account.clone(),
+                            market: order.market.clone(),
+                            pnl_usd: result.pnl_usd,
+                            execution_price: result.execution_price,
+                        },
+                    );
+                } else {
+                    env.events().publish(
+                        (symbol_short!("pos_dec"),),
+                        PositionDecreasedEvent {
+                            key: pos_key,
+                            account: order.account.clone(),
+                            market: order.market.clone(),
+                            delta_size_usd: order.size_delta_usd,
+                            pnl_usd: result.pnl_usd,
+                            execution_price: result.execution_price,
+                        },
+                    );
+                }
             }
         }
 
@@ -437,7 +617,6 @@ impl OrderHandler {
         let collateral_price = oracle_client.get_primary_price(&collateral_token).mid_price();
 
         // Load position to get size
-        use gmx_keys::position_key;
         let pk = position_key(&env, &account, &market, &collateral_token, is_long);
         let position: PositionProps = env.storage().persistent()
             .get(&PositionStorageKey::Position(pk.clone()))
@@ -466,8 +645,14 @@ impl OrderHandler {
         });
 
         env.events().publish(
-            (symbol_short!("liq_exe"),),
-            (account, market, result.pnl_usd, result.execution_price),
+            (symbol_short!("pos_liq"),),
+            PositionLiquidatedEvent {
+                key: pk,
+                account,
+                market,
+                execution_price: result.execution_price,
+                remaining_collateral: result.remaining_collateral,
+            },
         );
     }
 
@@ -560,4 +745,62 @@ fn remove_order(env: &Env, data_store: &Address, caller: &Address, key: &BytesN<
     let ds = DataStoreClient::new(env, data_store);
     ds.remove_bytes32_from_set(caller, &order_list_key(env), key);
     ds.remove_bytes32_from_set(caller, &account_order_list_key(env, account), key);
+}
+
+/// Resolve the trader's tier-based position fee factor for a market (issue #204).
+///
+/// Checks the trader's rolling 30-day volume (in ledger units: 259_200 = 30d × 24h × 12/hr at 5s/ledger),
+/// resets the window if expired, accumulates the order's size, then walks tiers 0-4 to find the
+/// best (lowest) fee factor the trader qualifies for. Returns 0 when no tier override applies
+/// (caller keeps the default fee stored in data_store).
+fn resolve_fee_tier(
+    env: &Env,
+    ds: &DataStoreClient,
+    caller: &Address,
+    account: &Address,
+    market: &Address,
+    size_delta_usd: i128,
+) -> u128 {
+    // 30 days in ledgers at ~5 s/ledger: 30 × 24 × 60 × 60 / 5 = 518_400
+    const WINDOW_LEDGERS: u32 = 518_400;
+
+    let vol_key   = trader_volume_key(env, account, market);
+    let start_key = trader_volume_window_start_key(env, account, market);
+
+    let window_start = ds.get_u128(&start_key) as u32;
+    let current_ledger: u32 = env.ledger().sequence();
+
+    // Reset rolling window if expired
+    let current_volume = if current_ledger.saturating_sub(window_start) > WINDOW_LEDGERS {
+        let seq_as_u128 = current_ledger as u128;
+        ds.set_u128(caller, &start_key, &seq_as_u128);
+        let zero: u128 = 0;
+        ds.set_u128(caller, &vol_key, &zero);
+        0u128
+    } else {
+        ds.get_u128(&vol_key)
+    };
+
+    // Accumulate this order's volume
+    let size_abs = if size_delta_usd < 0 { 0u128 } else { size_delta_usd as u128 };
+    let new_volume = current_volume.saturating_add(size_abs);
+    ds.set_u128(caller, &vol_key, &new_volume);
+
+    // Walk tiers 0-4, pick the highest tier whose threshold ≤ trader volume
+    // (tier 0 threshold is typically 0, i.e. everyone qualifies)
+    let mut best_fee_factor: u128 = 0;
+    for tier in 0u32..5 {
+        let threshold = ds.get_u128(&fee_tier_volume_threshold_key(env, market, tier));
+        if threshold == 0 && tier > 0 {
+            // Undefined tier — stop scanning
+            break;
+        }
+        if new_volume >= threshold {
+            let ff = ds.get_u128(&fee_tier_position_fee_factor_key(env, market, tier));
+            if ff > 0 {
+                best_fee_factor = ff;
+            }
+        }
+    }
+    best_fee_factor
 }

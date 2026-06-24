@@ -12,7 +12,16 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use soroban_sdk::{contracttype, Address, BytesN, Env};
+use soroban_sdk::{contracterror, contracttype, panic_with_error, Address, BytesN, Env};
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+enum IncreaseError {
+    PriceTooHigh        = 1,
+    PriceTooLow         = 2,
+    InsufficientCollateral = 3,
+}
 use gmx_types::{MarketProps, PositionProps, PriceProps};
 use gmx_math::{TOKEN_PRECISION, mul_div_wide};
 use gmx_keys::{
@@ -116,10 +125,10 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
     let execution_price = get_execution_price(env, index_price, p.size_delta_usd, impact_usd, p.is_long, true);
     if p.acceptable_price != 0 {
         if p.is_long && execution_price > p.acceptable_price {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(1));
+            panic_with_error!(env, IncreaseError::PriceTooHigh);
         }
         if !p.is_long && execution_price < p.acceptable_price {
-            soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(2));
+            panic_with_error!(env, IncreaseError::PriceTooLow);
         }
     }
 
@@ -140,7 +149,7 @@ pub fn increase_position(env: &Env, p: &IncreasePositionParams) -> PositionProps
     // 8. Update collateral: add deposited, subtract fees
     position.collateral_amount += p.collateral_amount - fees.total_cost_amount;
     if position.collateral_amount < 0 {
-        soroban_sdk::panic_with_error!(env, soroban_sdk::contracterror::Error::from_u32(3));
+        panic_with_error!(env, IncreaseError::InsufficientCollateral);
     }
 
     // 9. Update position size and funding/borrowing trackers
