@@ -34,6 +34,7 @@ Key types:
     stable_price <token>
     keeper_public_key <index>
     market_type_default
+    keeper_pubkey_key <index>
 
 Boolean args: true/1/yes/long = True; false/0/no/short = False
 """

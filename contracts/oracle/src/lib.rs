@@ -17,7 +17,7 @@
 #![no_std]
 #![allow(dependency_on_unit_never_type_fallback)]
 
-use gmx_keys::{keeper_public_key_prefix, stable_price_key};
+use gmx_keys::{keeper_public_key_prefix, stable_price_key, market_list_key, market_index_token_key, market_long_token_key, market_short_token_key};
 use gmx_types::{PriceProps, TokenPrice};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
@@ -97,6 +97,19 @@ trait IRoleStore {
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
     fn get_bytes32(env: Env, key: BytesN<32>) -> BytesN<32>;
+    fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
+    fn get_address_set_count(env: Env, set_key: BytesN<32>) -> u32;
+    fn get_address_set_at(env: Env, set_key: BytesN<32>, start: u32, end: u32) -> Vec<Address>;
+    fn set_bool(env: Env, caller: Address, key: BytesN<32>, value: bool) -> bool;
+}
+
+#[contracttype]
+pub struct CircuitBreakerTripped {
+    pub market: Address,
+    pub token: Address,
+    pub old_price: i128,
+    pub new_price: i128,
+    pub deviation_bps: u128,
 }
 
 // ─── Contract ─────────────────────────────────────────────────────────────────
@@ -205,6 +218,9 @@ impl Oracle {
             let pubkey = get_keeper_pubkey(&env, &data_store, sp.keeper_index);
             // ed25519_verify takes (&BytesN<32> pubkey, &Bytes message, &BytesN<64> sig)
             env.crypto().ed25519_verify(&pubkey, &msg, &sp.signature);
+
+            // Check circuit breaker before overwriting price
+            check_circuit_breaker(&env, &data_store, &sp.token, sp.min_price, sp.max_price);
 
             // Store in temporary storage and bump its TTL so the price survives
             // the keeper's set_prices → execute_* batch window (see PRICE_TTL_LEDGERS).
@@ -315,11 +331,20 @@ impl Oracle {
         caller.require_auth();
         require_order_keeper(&env, &caller);
 
+        let data_store: Address = env
+            .storage()
+            .instance()
+            .get(&InstanceKey::DataStore)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::NotInitialized));
+
         for i in 0..prices.len() {
             let tp = prices.get(i).unwrap();
             if tp.min <= 0 || tp.max <= 0 || tp.min > tp.max {
                 panic_with_error!(&env, Error::InvalidPrice);
             }
+
+            check_circuit_breaker(&env, &data_store, &tp.token, tp.min, tp.max);
+
             let price = PriceProps {
                 min: tp.min,
                 max: tp.max,
@@ -392,6 +417,56 @@ fn build_price_message(
     buf
 }
 
+fn check_circuit_breaker(env: &Env, data_store: &Address, token: &Address, new_min: i128, new_max: i128) {
+    let price_key = TempKey::Price(token.clone());
+    let prev_price_opt = env.storage().temporary().get::<TempKey, PriceProps>(&price_key);
+    
+    if let Some(prev_price) = prev_price_opt {
+        let last_price = prev_price.mid_price();
+        let new_price = (new_min + new_max) / 2;
+        if last_price > 0 {
+            let deviation_val = (new_price - last_price).abs();
+            let deviation_bps = ((deviation_val as u128) * 10000) / (last_price as u128);
+            
+            let ds = DataStoreClient::new(env, data_store);
+            let market_list_k = gmx_keys::market_list_key(env);
+            let market_count = ds.get_address_set_count(&market_list_k);
+            let markets = ds.get_address_set_at(&market_list_k, &0, &market_count);
+            
+            for i in 0..markets.len() {
+                let market = markets.get(i).unwrap();
+                let index_token = ds.get_address(&gmx_keys::market_index_token_key(env, &market));
+                let long_token = ds.get_address(&gmx_keys::market_long_token_key(env, &market));
+                let short_token = ds.get_address(&gmx_keys::market_short_token_key(env, &market));
+                
+                let matches_market = (index_token.is_some() && index_token.unwrap() == *token)
+                    || (long_token.is_some() && long_token.unwrap() == *token)
+                    || (short_token.is_some() && short_token.unwrap() == *token);
+                    
+                if matches_market {
+                    let threshold = ds.get_u128(&gmx_keys::circuit_breaker_factor_key(env, &market));
+                    if threshold > 0 && deviation_bps > threshold {
+                        // Set market pause flag to true
+                        ds.set_bool(&env.current_contract_address(), &gmx_keys::is_market_paused_key(env, &market), &true);
+                        
+                        // Emit event
+                        env.events().publish(
+                            (soroban_sdk::symbol_short!("cb_trip"),),
+                            CircuitBreakerTripped {
+                                market: market.clone(),
+                                token: token.clone(),
+                                old_price: last_price,
+                                new_price,
+                                deviation_bps,
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -418,6 +493,8 @@ mod tests {
         let oracle_id = env.register(Oracle, ());
         let passphrase = Bytes::from_slice(env, b"Test SDF Network ; September 2015");
         OracleClient::new(env, &oracle_id).initialize(&admin, &rs_id, &ds_id, &passphrase);
+
+        rs_client.grant_role(&admin, &oracle_id, &roles::controller(env));
 
         (admin, rs_id, ds_id, oracle_id)
     }
