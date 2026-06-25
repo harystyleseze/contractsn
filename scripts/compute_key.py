@@ -33,6 +33,7 @@ Key types:
     min_market_tokens_for_first_deposit <market>
     stable_price <token>
     market_type_default
+    keeper_pubkey_key <index>
 
 Boolean args: true/1/yes/long = True; false/0/no/short = False
 """
@@ -201,6 +202,18 @@ def stable_price_key(token: str) -> str:
     return _sha256(_push_str("STABLE_PRICE"), _push_addr(token))
 
 
+def keeper_pubkey_key(index: int) -> str:
+    """data_store key for the ed25519 keeper public key at the given index.
+
+    Mirrors get_keeper_pubkey() in contracts/oracle/src/lib.rs:
+      prefix = sha256(push_str("KEEPER_PUBLIC_KEY"))   # BytesN<32>
+      key    = sha256(prefix_bytes ‖ index_u32_BE)
+    """
+    prefix = bytes.fromhex(_sha256(_push_str("KEEPER_PUBLIC_KEY")))
+    key_input = prefix + struct.pack(">I", index)
+    return hashlib.sha256(key_input).hexdigest()
+
+
 # ── CLI dispatch ──────────────────────────────────────────────────────────────
 
 _DISPATCH = {
@@ -230,6 +243,7 @@ _DISPATCH = {
     "max_pnl_factor_for_adl": (2, lambda a: max_pnl_factor_for_adl_key(a[0], _parse_bool(a[1]))),
     "min_market_tokens_for_first_deposit": (1, lambda a: min_market_tokens_for_first_deposit_key(a[0])),
     "stable_price": (1, lambda a: stable_price_key(a[0])),
+    "keeper_pubkey_key": (1, lambda a: keeper_pubkey_key(int(a[0]))),
 }
 
 

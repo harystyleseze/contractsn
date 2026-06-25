@@ -22,6 +22,7 @@ fee-handler = { path = "../contracts/fee_handler" }
 market-token = { path = "../contracts/market_token" }
 
 [lib]
+path = "lib.rs"
 crate-type = ["cdylib"]
 
 [[test]]
