@@ -53,6 +53,8 @@ trait IRoleStore {
 #[soroban_sdk::contractclient(name = "DataStoreClient")]
 trait IDataStore {
     fn get_u128(env: Env, key: BytesN<32>) -> u128;
+    /// Cache-first read for rarely-changing market config (issue #299).
+    fn get_u128_cached(env: Env, key: BytesN<32>) -> u128;
     fn get_address(env: Env, key: BytesN<32>) -> Option<Address>;
 }
 
