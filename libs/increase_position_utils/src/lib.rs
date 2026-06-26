@@ -56,6 +56,9 @@ pub struct IncreasePositionParams<'a> {
     pub index_token_price: &'a PriceProps,
     pub collateral_price: i128, // FLOAT_PRECISION
     pub current_time: u64,
+    /// true = maker (positive price impact), false = taker (negative price impact).
+    /// Selects position_fee_factor_key(market, for_positive_impact) for fee computation.
+    pub for_positive_impact: bool,
 }
 
 // ─── Main entry ───────────────────────────────────────────────────────────────
@@ -441,6 +444,7 @@ mod tests {
                     index_token_price: &index_price_props,
                     collateral_price: index_price,
                     current_time: 1_000,
+                    for_positive_impact: true,
                 },
             )
         });
@@ -492,6 +496,7 @@ mod tests {
                     index_token_price: &index_price_props,
                     collateral_price: index_price,
                     current_time: 1_000,
+                    for_positive_impact: true,
                 },
             )
         });
@@ -550,6 +555,7 @@ mod tests {
                     index_token_price: &index_price_props,
                     collateral_price: index_price,
                     current_time: 1_000,
+                    for_positive_impact: true,
                 },
             )
         });
@@ -627,6 +633,7 @@ mod tests {
                     index_token_price: &index_price_props,
                     collateral_price: index_price,
                     current_time: 1_000,
+                    for_positive_impact: true,
                 },
             )
         });
@@ -662,6 +669,7 @@ mod tests {
             index_token_price: index_price_props,
             collateral_price: index_price,
             current_time: 1_000,
+            for_positive_impact: true,
         }
     }
 
@@ -827,6 +835,7 @@ mod tests {
             index_token_price: &price_props,
             collateral_price: index_price,
             current_time: 1_000,
+            for_positive_impact: true,
         };
         let short_pos = w
             .env
